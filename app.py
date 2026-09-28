@@ -939,6 +939,7 @@ MAP_SLOTS: List[Tuple[str, str, Tuple[str, ...], str]] = [
                                            "expires", "term end"), "date"),
     ("contract_start", "Contract start date", ("contract start", "start date", "go live", "live date",
                                                "commence"), "date"),
+    ("contract_term", "Contract term (months)", ("term months", "contract term", "term (months)"), "any"),
     ("users", "Number of users / seats", ("users", "seats", "extensions", "licences", "licenses", "handsets"), "any"),
     ("broadband", "Broadband (any date/value = has it)", ("broadband", "internet", "fibre", "fttp", "fttc", "leased line",
                                                "connectivity"), "any"),
@@ -961,7 +962,7 @@ SERVICE_WORDS = {
     "integration": ("integration", "screen pop", "screen-pop", "crm connect"),
     "cctv": ("cctv", "camera"),
     "headsets": ("headset",),
-    "networking": ("wifi", "wi-fi", "network", "firewall", "router", "switch"),
+    "networking": ("wifi", "wi-fi", "network", "firewall", "router", "switch", "it services", "it support"),
 }
 NO_VALUES = {"", "no", "none", "n/a", "na", "0", "-none-", "false", "not taken", "nil", "-"}
 
@@ -969,8 +970,9 @@ NO_VALUES = {"", "no", "none", "n/a", "na", "0", "-none-", "false", "not taken",
 # SY Comms' own Zoho Account fields (by label), used first. Any date or value in them = they have it,
 # e.g. a "BB Install Date" means they have broadband with us.
 SYC_FIELD_DEFAULTS: Dict[str, Tuple[str, ...]] = {
-    "contract_end": ("END DATE",),
-    "contract_start": ("START DATE",),
+    "contract_end": ("Contract Date End", "END DATE"),
+    "contract_start": ("Contract Signed Date", "START DATE"),
+    "contract_term": ("Contract Term Months",),
     "users": ("No. of System Users",),
     "broadband": ("BB Install Date",),
     "mobiles": ("Latest Mobile Invoice",),
@@ -1085,6 +1087,14 @@ def account_snapshot(acct: Dict[str, Any], fmap: Dict[str, str]) -> Dict[str, An
     today = now_uk().replace(tzinfo=None)
     end = parse_date(acct.get(fmap["contract_end"])) if fmap.get("contract_end") else None
     start = parse_date(acct.get(fmap["contract_start"])) if fmap.get("contract_start") else None
+    if not end and start and fmap.get("contract_term"):
+        try:  # No end date typed in: work it out from the signed date + term
+            term = int(float(value_text(acct.get(fmap["contract_term"])) or 0))
+        except ValueError:
+            term = 0
+        if term > 0:
+            y, m = divmod(start.month - 1 + term, 12)
+            end = start.replace(year=start.year + y, month=m + 1, day=min(start.day, 28))
     since = start or parse_date(acct.get("Created_Time"))
     users_raw = acct.get(fmap["users"]) if fmap.get("users") else None
     try:
@@ -1559,7 +1569,12 @@ def get_field_map() -> Tuple[Dict[str, str], bool]:
     """(map, saved). Uses the saved mapping, else a best guess from the Account field labels."""
     saved = get_settings().get("field_map")
     if isinstance(saved, dict) and saved:
-        return {k: v for k, v in saved.items() if v}, True
+        out = {k: v for k, v in saved.items() if v}
+        if "contract_term" not in saved:  # Added after some mappings were saved: fill it in automatically
+            auto = auto_field_map(st.session_state.get("acct_fields") or {})
+            if auto.get("contract_term"):
+                out["contract_term"] = auto["contract_term"]
+        return out, True
     return auto_field_map(st.session_state.get("acct_fields") or {}), False
 
 
