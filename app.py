@@ -819,6 +819,22 @@ class ZohoCRM:
 # ==========================================
 
 ACCOUNT_TYPES_DEFAULT = ["SYC Customer", "SY Plus Customer", "South Wales Comms"]
+# How each brand's customer type is recognised, whatever exact spelling Zoho uses
+BRAND_PATTERNS = {"SYC Customer": ("syc",), "SY Plus Customer": ("syplus", "sy+"),
+                  "South Wales Comms": ("southwales", "swcomms", "swc")}
+
+
+def _norm(v: str) -> str:
+    return re.sub(r"[^a-z0-9+]", "", (v or "").lower())
+
+
+def brand_key(value: str) -> Optional[str]:
+    """Which brand a customer-type value belongs to (e.g. 'SYC Customer', 'SYC - Customer' -> 'SYC Customer')."""
+    n = _norm(value)
+    for key, pats in BRAND_PATTERNS.items():
+        if any(n.startswith(p) or p in n for p in pats):
+            return key
+    return None
 
 # Each Account Type is emailed as its own brand. Contact details for SY Plus and South Wales Comms
 # are filled in once under "Brand details" in the app (saved to GitHub), until then SY Comms is used.
@@ -970,6 +986,8 @@ def auto_field_map(fields: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
             label = (f.get("field_label") or api).lower()
             if api in used or api in ("Account_Name", "Account_Type", "Industry", "Description"):
                 continue
+            if any(brand_key(v.get("actual_value") or "") for v in (f.get("pick_list_values") or [])):
+                continue  # That's the customer-type field, not a service
             if kind == "date" and (f.get("data_type") or "") not in DATE_TYPES:
                 continue
             if any(w in label for w in words):
@@ -1339,18 +1357,47 @@ COQL_UNSUPPORTED = {"fileupload", "imageupload", "subform", "multiselectlookup",
                     "multi_module_lookup", "multiuserlookup"}
 
 
+PICK_TYPES = {"picklist", "multiselectpicklist"}
+
+
+def detect_type_field(afields: Dict[str, Dict[str, Any]]) -> str:
+    """The Account field that holds SYC Customer / SY Plus Customer / South Wales Comms."""
+    saved = get_settings().get("type_field")
+    if saved and saved in afields:
+        return saved
+    best, best_n = "Account_Type", 0
+    for api, f in afields.items():
+        if (f.get("data_type") or "") not in PICK_TYPES:
+            continue
+        n = sum(1 for v in ZOHO.picklist(afields, api) if brand_key(v))
+        if n > best_n or (n == best_n and n and api == "Account_Type"):
+            best, best_n = api, n
+    return best
+
+
+def type_matches(value: Any, wanted: Set[str]) -> bool:
+    vals = value if isinstance(value, list) else [value]
+    return any(value_text(v) in wanted for v in vals)
+
+
 def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Fast path is COQL. If Zoho refuses the query for any reason, fall back to reading every account with the
     Get Records API (slower, but it accepts any field) and filter by type here."""
+    tf = detect_type_field(afields)
     try:
-        return _load_accounts_coql(types, afields, fmap)
+        if (afields.get(tf, {}).get("data_type") or "") == "multiselectpicklist":
+            raise ZohoError("the customer type field is a multi-select list")
+        accts, skipped = _load_accounts_coql(types, afields, fmap, tf)
     except ZohoError as exc:
         st.session_state["load_diag"] = f"COQL refused the query ({exc}); used the slower Get Records route instead."
         base = [f for f in ACCOUNT_BASE if f in afields]
-        mapped = [v for v in dict.fromkeys(fmap.values()) if v in afields and v not in base]
+        mapped = [v for v in dict.fromkeys(list(fmap.values()) + [tf]) if v in afields and v not in base]
         recs = ZOHO.get_records("Accounts", (base + mapped)[:50])
-        wanted = set(types)
-        return [r for r in recs.values() if value_text(r.get("Account_Type")) in wanted], []
+        accts, skipped = [r for r in recs.values() if type_matches(r.get(tf), set(types))], []
+    for a in accts:
+        a["_type"] = next((value_text(v) for v in (a.get(tf) if isinstance(a.get(tf), list) else [a.get(tf)])
+                           if value_text(v) in types), value_text(a.get(tf)))
+    return accts, skipped
 
 
 def load_contacts() -> List[Dict[str, Any]]:
@@ -1361,14 +1408,15 @@ def load_contacts() -> List[Dict[str, Any]]:
         return [r for r in recs.values() if (r.get("Email") or "").strip()]
 
 
-def _load_accounts_coql(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+def _load_accounts_coql(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str],
+                        tf: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Accounts of the given types with every mapped field. Returns (accounts, labels of fields skipped)."""
     base = [f for f in ACCOUNT_BASE if f in afields]
-    mapped = [v for v in dict.fromkeys(fmap.values()) if v in afields and v not in base]
+    mapped = [v for v in dict.fromkeys(list(fmap.values()) + [tf]) if v in afields and v not in base]
     by_api = [f for f in mapped if (afields[f].get("data_type") or "") in COQL_UNSUPPORTED]
     extra = [f for f in mapped if f not in by_api]
     quoted = ", ".join("'" + t.replace("'", "\\'") + "'" for t in types)
-    where = f"Account_Type in ({quoted})"
+    where = f"{tf} in ({quoted})"
     skipped: List[str] = []
     try:
         accts = ZOHO.query_all("Accounts", base + extra, where)
@@ -1483,10 +1531,10 @@ def get_brands() -> Dict[str, Dict[str, Any]]:
 def brand_for(account_type: str) -> Tuple[Dict[str, Any], bool]:
     """(brand, is_fallback). Brands without an email and phone fall back to SY Communications."""
     brands = get_brands()
-    b = brands.get(account_type or "")
+    b = brands.get(account_type or "") or brands.get(brand_key(account_type or "") or "")
     if b and b.get("email") and b.get("phone"):
         return b, False
-    return brands["SYC Customer"], account_type != "SYC Customer"
+    return brands["SYC Customer"], (brand_key(account_type or "") or account_type) != "SYC Customer"
 
 
 def get_field_map() -> Tuple[Dict[str, str], bool]:
@@ -1532,7 +1580,7 @@ def rank_contacts(contacts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def build_item(acct: Dict[str, Any]) -> Dict[str, Any]:
     fmap, _ = get_field_map()
     snap = account_snapshot(acct, fmap)
-    brand, fallback = brand_for(acct.get("Account_Type") or "")
+    brand, fallback = brand_for(acct.get("_type") or "")
     contacts = rank_contacts(st.session_state.get("contacts_by_acct", {}).get(acct["id"], []))
     ranked = rank_offers(snap)
     return {
@@ -1756,8 +1804,25 @@ with col_left:
 
         if ready:
             afields = st.session_state["acct_fields"]
-            types = ZOHO.picklist(afields, "Account_Type") or ACCOUNT_TYPES_DEFAULT
-            default_types = [t for t in ACCOUNT_TYPES_DEFAULT if t in types] or types[:1]
+            tf = detect_type_field(afields)
+            types = ZOHO.picklist(afields, tf) or ACCOUNT_TYPES_DEFAULT
+            default_types = ([t for t in types if brand_key(t) == "SYC Customer"]
+                             or [t for t in types if brand_key(t)] or types[:1])
+            if not any(brand_key(t) for t in types):
+                st.warning(f"The '{afields.get(tf, {}).get('field_label', tf)}' field has no SYC / SY Plus / South Wales"
+                           " options. Pick the field that holds your customer types:")
+            pick_fields = [a_ for a_, f_ in afields.items() if (f_.get("data_type") or "") in PICK_TYPES]
+            with st.expander("Customer type field", expanded=not any(brand_key(t) for t in types)):
+                new_tf = st.selectbox(
+                    "Which Account field says SYC Customer / SY Plus Customer / South Wales Comms?", pick_fields,
+                    index=pick_fields.index(tf) if tf in pick_fields else 0,
+                    format_func=lambda a_: f"{afields[a_].get('field_label') or a_}  ·  "
+                                           + ", ".join(ZOHO.picklist(afields, a_)[:6]),
+                    key="type_field_pick")
+                if new_tf != tf and st.button("Use this field", type="primary"):
+                    save_settings("type_field", new_tf)
+                    st.session_state.pop("accts", None)
+                    st.rerun()
             t1, t2 = columns([2.2, 1])
             with t1:
                 chosen_types = st.multiselect("Account type", types, default=default_types,
@@ -1886,7 +1951,7 @@ with col_left:
                         saved_b[btype] = vals
                         e_ = save_settings("brands", saved_b)
                         for it in queue.values():  # Re-brand anything already queued
-                            it["brand"], it["brand_fallback"] = brand_for(it["acct"].get("Account_Type") or "")
+                            it["brand"], it["brand_fallback"] = brand_for(it["acct"].get("_type") or "")
                             it["sig"] = None
                         (st.warning(f"Saved for this session only: {e_}") if e_ else st.success(f"{vals['name']} saved."))
 
@@ -1899,7 +1964,7 @@ with col_left:
             type_counts: Dict[str, int] = {}
             sector_counts: Dict[str, int] = {}
             for a in accts_all:
-                type_counts[a.get("Account_Type") or "—"] = type_counts.get(a.get("Account_Type") or "—", 0) + 1
+                type_counts[a.get("_type") or "—"] = type_counts.get(a.get("_type") or "—", 0) + 1
                 s_ = a["_snap"]["profile"]["name"]
                 sector_counts[s_] = sector_counts.get(s_, 0) + 1
             f1, f2 = st.columns(2)
@@ -1959,7 +2024,7 @@ with col_left:
 
             rows = [
                 a for a in accts_all
-                if (not f_types or (a.get("Account_Type") or "—") in f_types)
+                if (not f_types or (a.get("_type") or "—") in f_types)
                 and (not f_sectors or a["_snap"]["profile"]["name"] in f_sectors)
                 and _end_ok(a["_snap"])
                 and (min_in is None or a["_snap"]["months_in"] is None or a["_snap"]["months_in"] >= min_in)
@@ -1977,7 +2042,7 @@ with col_left:
 
                 df = pd.DataFrame([{
                     "Customer": a.get("Account_Name", ""),
-                    "Type": a.get("Account_Type", ""),
+                    "Type": a.get("_type", ""),
                     "Industry": a["_snap"]["profile"]["name"],
                     "Ends": a["_snap"]["end"],
                     "Left": (round(a["_snap"]["months_left"]) if a["_snap"]["months_left"] is not None else None),
@@ -2046,7 +2111,7 @@ with col_right:
             acct, snap, brand = item["acct"], item["snap"], item["brand"]
             section_header("03", "Customer card", "Check the ideas, tweak the email and send.")
             ml = snap["months_left"]
-            meta = [chip(acct.get("Account_Type") or "Customer"), chip(brand["name"], "accent"),
+            meta = [chip(acct.get("_type") or "Customer"), chip(brand["name"], "accent"),
                     chip(snap["profile"]["name"], "muted")]
             if ml is not None:
                 meta.append(chip(("Contract ended" if ml < 0 else f"Ends {snap['end'].strftime('%b %Y')}"),
@@ -2062,7 +2127,7 @@ with col_right:
             with z2:
                 st.link_button("Open in Zoho ↗", ZOHO.record_url("Accounts", aid), **FULL_WIDTH)
             if item["brand_fallback"]:
-                st.info(f"{acct.get('Account_Type')} brand details aren't filled in yet, so this email uses SY Communications."
+                st.info(f"{acct.get('_type')} brand details aren't filled in yet, so this email uses SY Communications."
                         " Add them under Brand details.")
 
             # Services at a glance
