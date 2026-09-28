@@ -892,14 +892,14 @@ MAP_SLOTS: List[Tuple[str, str, Tuple[str, ...], str]] = [
     ("contract_start", "Contract start date", ("contract start", "start date", "go live", "live date",
                                                "commence"), "date"),
     ("users", "Number of users / seats", ("users", "seats", "extensions", "licences", "licenses", "handsets"), "any"),
-    ("broadband", "Broadband / connectivity", ("broadband", "internet", "fibre", "fttp", "fttc", "leased line",
+    ("broadband", "Broadband (any date/value = has it)", ("broadband", "internet", "fibre", "fttp", "fttc", "leased line",
                                                "connectivity"), "any"),
-    ("mobiles", "Mobiles", ("mobile", "sim"), "any"),
+    ("mobiles", "Mobiles (any date/value = has it)", ("mobile", "sim"), "any"),
     ("call_scope", "Call Scope", ("call scope", "callscope", "call analytics", "call recording"), "any"),
     ("integration", "CRM integration", ("integration", "crm connect", "screen pop", "screen-pop"), "any"),
     ("cctv", "CCTV", ("cctv", "camera"), "any"),
     ("headsets", "Headsets", ("headset",), "any"),
-    ("networking", "Networking / Wi-Fi", ("wifi", "wi-fi", "network", "firewall", "router"), "any"),
+    ("networking", "Networking / Wi-Fi (any value = has it)", ("wifi", "wi-fi", "network", "firewall", "router"), "any"),
     ("services", "Services list (a field listing everything they have)", ("services", "products", "solutions"),
      "any"),
 ]
@@ -918,11 +918,34 @@ SERVICE_WORDS = {
 NO_VALUES = {"", "no", "none", "n/a", "na", "0", "-none-", "false", "not taken", "nil", "-"}
 
 
+# SY Comms' own Zoho Account fields (by label), used first. Any date or value in them = they have it,
+# e.g. a "BB Install Date" means they have broadband with us.
+SYC_FIELD_DEFAULTS: Dict[str, Tuple[str, ...]] = {
+    "contract_end": ("END DATE",),
+    "contract_start": ("START DATE",),
+    "users": ("No. of System Users",),
+    "broadband": ("BB Install Date",),
+    "mobiles": ("Latest Mobile Invoice",),
+    "networking": ("IT SERVICES CUSTOMER",),
+    "services": ("Current Products",),
+}
+
+
 def auto_field_map(fields: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
-    """Best guess of which Account field holds each slot, from the field labels."""
+    """Which Account field holds each slot: SY Comms' known fields first, then a guess from the labels."""
     used: Set[str] = set()
     out: Dict[str, str] = {}
+    by_label = {(f.get("field_label") or api).strip().lower(): api for api, f in fields.items()}
+    for slot, labels in SYC_FIELD_DEFAULTS.items():
+        for label in labels:
+            api = by_label.get(label.lower())
+            if api and api not in used:
+                out[slot] = api
+                used.add(api)
+                break
     for slot, _, words, kind in MAP_SLOTS:
+        if slot in out:
+            continue
         for api, f in fields.items():
             label = (f.get("field_label") or api).lower()
             if api in used or api in ("Account_Name", "Account_Type", "Industry", "Description"):
@@ -1001,10 +1024,12 @@ def account_snapshot(acct: Dict[str, Any], fmap: Dict[str, str]) -> Dict[str, An
     has: Dict[str, Optional[bool]] = {}
     for key in ("broadband", "mobiles", "call_scope", "integration", "cctv", "headsets", "networking"):
         api = fmap.get(key)
+        in_products = any(w in services_text for w in SERVICE_WORDS[key]) if services_text else False
         if api:
-            has[key] = has_value(acct.get(api))
-        elif services_text:
-            has[key] = any(w in services_text for w in SERVICE_WORDS[key])
+            # Their own field (a date, value or file) or a mention in Current Products both count
+            has[key] = has_value(acct.get(api)) or in_products
+        elif fmap.get("services"):
+            has[key] = in_products
         else:
             has[key] = None
     today = now_uk().replace(tzinfo=None)
@@ -1729,6 +1754,23 @@ with col_left:
                          st.success("Saved. Click Load customers again to use it."))
                 if "contract_end" not in fmap:
                     st.caption("💡 Without a contract end date, the renewal filters and contract-review emails are switched off.")
+                if fmap_saved and st.button("↺ Reset to the SY Comms defaults", key="map_reset"):
+                    save_settings("field_map", {})
+                    for slot, _, _, _ in MAP_SLOTS:
+                        st.session_state.pop(f"map_{slot}", None)
+                    st.session_state.pop("accts", None)
+                    st.rerun()
+                prod_api = fmap.get("services")
+                prod_vals = ZOHO.picklist(afields, prod_api) if prod_api else []
+                if prod_vals:
+                    def _svc_of(v: str) -> str:
+                        low = v.lower()
+                        hits = [OFFER_TITLES[k] for k, ws in SERVICE_WORDS.items() if any(w in low for w in ws)]
+                        return ", ".join(hits) if hits else "—"
+                    st.caption(f"How each **{afields.get(prod_api, {}).get('field_label', 'product')}** option is read"
+                               " (— means it doesn't count towards any idea):")
+                    _dataframe(pd.DataFrame([{"Option in Zoho": v, "Counts as": _svc_of(v)} for v in prod_vals]),
+                               hide_index=True, height=min(38 + 35 * len(prod_vals), 320))
 
             # ---- Brand details (once, shared) ----
             brands = get_brands()
