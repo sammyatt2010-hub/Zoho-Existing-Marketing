@@ -1340,6 +1340,28 @@ COQL_UNSUPPORTED = {"fileupload", "imageupload", "subform", "multiselectlookup",
 
 
 def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Fast path is COQL. If Zoho refuses the query for any reason, fall back to reading every account with the
+    Get Records API (slower, but it accepts any field) and filter by type here."""
+    try:
+        return _load_accounts_coql(types, afields, fmap)
+    except ZohoError as exc:
+        st.session_state["load_diag"] = f"COQL refused the query ({exc}); used the slower Get Records route instead."
+        base = [f for f in ACCOUNT_BASE if f in afields]
+        mapped = [v for v in dict.fromkeys(fmap.values()) if v in afields and v not in base]
+        recs = ZOHO.get_records("Accounts", (base + mapped)[:50])
+        wanted = set(types)
+        return [r for r in recs.values() if value_text(r.get("Account_Type")) in wanted], []
+
+
+def load_contacts() -> List[Dict[str, Any]]:
+    try:
+        return ZOHO.query_all("Contacts", CONTACT_FIELDS, "Email is not null")
+    except ZohoError:
+        recs = ZOHO.get_records("Contacts", CONTACT_FIELDS)
+        return [r for r in recs.values() if (r.get("Email") or "").strip()]
+
+
+def _load_accounts_coql(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Accounts of the given types with every mapped field. Returns (accounts, labels of fields skipped)."""
     base = [f for f in ACCOUNT_BASE if f in afields]
     mapped = [v for v in dict.fromkeys(fmap.values()) if v in afields and v not in base]
@@ -1754,9 +1776,12 @@ with col_left:
                     contacts: List[Dict[str, Any]] = []
                     if not load_err:
                         try:
-                            contacts = ZOHO.query_all("Contacts", CONTACT_FIELDS, "Email is not null")
+                            contacts = load_contacts()
                         except ZohoError as exc:
                             load_err = f"Loaded the accounts but not their contacts. {exc}"
+                if st.session_state.get("load_diag"):
+                    with st.expander("Technical details"):
+                        st.caption(st.session_state.pop("load_diag"))
                 if skipped_fields:
                     st.warning("Zoho wouldn't let the app read: " + ", ".join(skipped_fields)
                                + ". Those services show as 'not recorded'. Pick a different field in the mapping if you can.")
