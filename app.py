@@ -1916,7 +1916,7 @@ with col_left:
                     "</div>")
 
             # ---- Field mapping (once, shared) ----
-            with st.expander("⚙️  Zoho field mapping" + ("" if fmap_saved else "  ·  please check"), expanded=not fmap_saved):
+            with st.expander("⚙️  Zoho field mapping" + ("" if fmap_saved else "  ·  using SY Comms defaults"), expanded=False):
                 st.caption("Tell the app which Account fields hold each service and the contract dates. I've guessed from"
                            " the field names; fix any that are wrong, then Save. It's saved for everyone.")
                 opts = [NOT_MAPPED] + sorted(afields, key=lambda k: (afields[k].get("field_label") or k).lower())
