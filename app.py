@@ -756,6 +756,26 @@ class ZohoCRM:
             offset += ZOHO_PAGE
         return out
 
+    def get_records(self, module: str, fields: List[str]) -> Dict[str, Dict[str, Any]]:
+        """{id: record} for all records, via the Get Records API (for field types COQL can't read, like files)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        params: Dict[str, Any] = {"fields": ",".join(fields), "per_page": 200}
+        page = 1
+        while len(out) < ZOHO_MAX_RECORDS:
+            body = self._request("GET", f"/crm/v8/{module}", params=dict(params, page=page) if "page_token" not in params
+                                 else params) or {}
+            for r in body.get("data") or []:
+                out[str(r.get("id"))] = r
+            info = body.get("info") or {}
+            if not info.get("more_records"):
+                break
+            if info.get("next_page_token"):
+                params["page_token"] = info["next_page_token"]
+                params.pop("page", None)
+            else:
+                page += 1
+        return out
+
     # ---------- writes (phase 2): send, fill blanks, notes ----------
     @staticmethod
     def _row_result(body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1314,6 +1334,45 @@ SETTINGS = SentLog("GITHUB_CG_SETTINGS_PATH", "cg_settings.json", ".cg_settings.
 ACCOUNT_BASE = ["Account_Name", "Account_Type", "Industry", "Phone", "Website", "Billing_City", "Billing_Code",
                 "Created_Time"]
 CONTACT_FIELDS = ["First_Name", "Last_Name", "Email", "Title", "Email_Opt_Out", "Account_Name"]
+# Field types COQL can't select; these are fetched with the Get Records API instead
+COQL_UNSUPPORTED = {"fileupload", "imageupload", "subform", "multiselectlookup", "profileimage",
+                    "multi_module_lookup", "multiuserlookup"}
+
+
+def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Accounts of the given types with every mapped field. Returns (accounts, labels of fields skipped)."""
+    base = [f for f in ACCOUNT_BASE if f in afields]
+    mapped = [v for v in dict.fromkeys(fmap.values()) if v in afields and v not in base]
+    by_api = [f for f in mapped if (afields[f].get("data_type") or "") in COQL_UNSUPPORTED]
+    extra = [f for f in mapped if f not in by_api]
+    quoted = ", ".join("'" + t.replace("'", "\\'") + "'" for t in types)
+    where = f"Account_Type in ({quoted})"
+    skipped: List[str] = []
+    try:
+        accts = ZOHO.query_all("Accounts", base + extra, where)
+    except ZohoError as exc:
+        if "invalid" not in str(exc).lower():
+            raise
+        # Find the column(s) Zoho won't accept, drop them and carry on
+        good = []
+        for f in extra:
+            try:
+                ZOHO._request("POST", "/crm/v8/coql", json={"select_query":
+                              f"select Account_Name, {f} from Accounts where {where} limit 0, 1"})
+                good.append(f)
+            except ZohoError:
+                by_api.append(f)
+        accts = ZOHO.query_all("Accounts", base + good, where)
+    if by_api:
+        try:
+            extra_vals = ZOHO.get_records("Accounts", ["Account_Name"] + by_api)
+            for a in accts:
+                rec = extra_vals.get(str(a.get("id")), {})
+                for f in by_api:
+                    a[f] = rec.get(f)
+        except ZohoError:
+            skipped += [afields[f].get("field_label") or f for f in by_api]
+    return accts, skipped
 DECISION_WORDS = ("owner", "director", "partner", "principal", "managing", "ceo", "founder", "proprietor")
 MANAGER_WORDS = ("manager", "head", "lead")
 MAX_BATCH = 25
@@ -1685,19 +1744,27 @@ with col_left:
                 load_btn = st.button("Load customers", type="primary", disabled=not chosen_types, **FULL_WIDTH)
             fmap, fmap_saved = get_field_map()
             if load_btn:
-                wanted = [f for f in ACCOUNT_BASE if f in afields] + [v for v in fmap.values() if v in afields]
-                wanted = list(dict.fromkeys(wanted))
-                quoted = ", ".join("'" + t.replace("'", "\\'") + "'" for t in chosen_types)
+                skipped_fields: List[str] = []
                 with st.spinner("Pulling accounts and contacts from Zoho…"):
                     try:
-                        accts = ZOHO.query_all("Accounts", wanted, f"Account_Type in ({quoted})")
-                        contacts = ZOHO.query_all("Contacts", CONTACT_FIELDS + ["id"], "Email is not null")
+                        accts, skipped_fields = load_accounts(chosen_types, afields, fmap)
                         load_err = None
                     except ZohoError as exc:
-                        accts, contacts, load_err = [], [], str(exc)
-                if load_err:
+                        accts, load_err = [], f"Couldn't load accounts. {exc}"
+                    contacts: List[Dict[str, Any]] = []
+                    if not load_err:
+                        try:
+                            contacts = ZOHO.query_all("Contacts", CONTACT_FIELDS, "Email is not null")
+                        except ZohoError as exc:
+                            load_err = f"Loaded the accounts but not their contacts. {exc}"
+                if skipped_fields:
+                    st.warning("Zoho wouldn't let the app read: " + ", ".join(skipped_fields)
+                               + ". Those services show as 'not recorded'. Pick a different field in the mapping if you can.")
+                if load_err and not accts:
                     st.error(load_err)
                 else:
+                    if load_err:
+                        st.warning(load_err)
                     by_acct: Dict[str, List[Dict[str, Any]]] = {}
                     for c in contacts:
                         aid = str((c.get("Account_Name") or {}).get("id") or "") if isinstance(c.get("Account_Name"), dict) else ""
