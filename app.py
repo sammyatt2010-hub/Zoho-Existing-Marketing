@@ -723,9 +723,21 @@ class ZohoCRM:
 
     @staticmethod
     def picklist(fields: Dict[str, Dict[str, Any]], api_name: str) -> List[str]:
+        """The options as people see them in Zoho (renamed standard options keep an old 'actual' value)."""
         values = (fields.get(api_name) or {}).get("pick_list_values") or []
-        out = [v.get("actual_value") or v.get("display_value") for v in values]
+        out = [v.get("display_value") or v.get("actual_value") for v in values]
         return [v for v in out if v and v != "-None-"]
+
+    @staticmethod
+    def picklist_aliases(fields: Dict[str, Dict[str, Any]], api_name: str) -> Dict[str, str]:
+        """{any spelling Zoho may use (display or actual value): display value}."""
+        out: Dict[str, str] = {}
+        for v in (fields.get(api_name) or {}).get("pick_list_values") or []:
+            shown = v.get("display_value") or v.get("actual_value")
+            for alias in (v.get("display_value"), v.get("actual_value")):
+                if alias and shown:
+                    out[alias] = shown
+        return out
 
     def org_domain(self) -> Optional[str]:
         try:
@@ -1365,6 +1377,9 @@ def detect_type_field(afields: Dict[str, Dict[str, Any]]) -> str:
     saved = get_settings().get("type_field")
     if saved and saved in afields:
         return saved
+    # Zoho's own Account Type field wins whenever it holds the customer types
+    if any(brand_key(v) for v in ZOHO.picklist(afields, "Account_Type")):
+        return "Account_Type"
     best, best_n = "Account_Type", 0
     for api, f in afields.items():
         if (f.get("data_type") or "") not in PICK_TYPES:
@@ -1384,19 +1399,22 @@ def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Di
     """Fast path is COQL. If Zoho refuses the query for any reason, fall back to reading every account with the
     Get Records API (slower, but it accepts any field) and filter by type here."""
     tf = detect_type_field(afields)
+    aliases = ZOHO.picklist_aliases(afields, tf)
+    # Every spelling of the chosen types (e.g. 'SYC Customer' is stored as 'Customer' if it was renamed in Zoho)
+    wanted = set(types) | {a for a, shown in aliases.items() if shown in types}
     try:
         if (afields.get(tf, {}).get("data_type") or "") == "multiselectpicklist":
             raise ZohoError("the customer type field is a multi-select list")
-        accts, skipped = _load_accounts_coql(types, afields, fmap, tf)
+        accts, skipped = _load_accounts_coql(sorted(wanted), afields, fmap, tf)
     except ZohoError as exc:
         st.session_state["load_diag"] = f"COQL refused the query ({exc}); used the slower Get Records route instead."
         base = [f for f in ACCOUNT_BASE if f in afields]
         mapped = [v for v in dict.fromkeys(list(fmap.values()) + [tf]) if v in afields and v not in base]
         recs = ZOHO.get_records("Accounts", (base + mapped)[:50])
-        accts, skipped = [r for r in recs.values() if type_matches(r.get(tf), set(types))], []
+        accts, skipped = [r for r in recs.values() if type_matches(r.get(tf), wanted)], []
     for a in accts:
-        a["_type"] = next((value_text(v) for v in (a.get(tf) if isinstance(a.get(tf), list) else [a.get(tf)])
-                           if value_text(v) in types), value_text(a.get(tf)))
+        vals = [aliases.get(value_text(v), value_text(v)) for v in (a.get(tf) if isinstance(a.get(tf), list) else [a.get(tf)])]
+        a["_type"] = next((v for v in vals if v in types), vals[0] if vals else "")
     return accts, skipped
 
 
