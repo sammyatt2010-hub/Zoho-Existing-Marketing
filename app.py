@@ -1239,7 +1239,7 @@ def _email_plain_html(body: str) -> str:
             + "".join(out) + "</body></html>")
 
 
-def _email_branded_html(body: str, subject: str, brand: Dict[str, Any]) -> str:
+def _email_branded_html(body: str, subject: str, brand: Dict[str, Any], cta_label: Optional[str] = None) -> str:
     """Branded email (tables + inline styles, no images) in the account's own brand colours."""
     purple, teal = brand.get("primary") or "#1f1450", brand.get("accent") or "#00b5a3"
     font = "font-family:'Segoe UI',Calibri,Arial,Helvetica,sans-serif"
@@ -1270,6 +1270,7 @@ def _email_branded_html(body: str, subject: str, brand: Dict[str, Any]) -> str:
             cards = ""
             for l in lines:
                 title, _, desc = l.lstrip()[2:].partition(": ")
+                desc = desc[:1].upper() + desc[1:]
                 cards += (
                     f'<tr><td style="padding:0 0 10px 0"><table role="presentation" width="100%" cellpadding="0" '
                     f'cellspacing="0" border="0"><tr><td style="background:#f5f4fb;border-left:4px solid {teal};'
@@ -1295,6 +1296,16 @@ def _email_branded_html(body: str, subject: str, brand: Dict[str, Any]) -> str:
                 f'<tr><td style="padding:0 36px 18px 36px;{font};font-size:14px">'
                 f'<a href="{e(m.group(2))}" style="color:{teal};font-weight:700;text-decoration:none">'
                 f'&#9654;&nbsp; {e(m.group(1))} &rarr;</a></td></tr>')
+            continue
+        if low.startswith("just reply") and cta_label:
+            href = f"mailto:{brand.get('email', '')}?subject={quote(cta_label)}"
+            rows.append(
+                f'<tr><td align="center" style="padding:8px 36px 6px 36px">'
+                f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+                f'<td align="center" bgcolor="{teal}" style="border-radius:8px">'
+                f'<a href="{e(href)}" style="display:inline-block;padding:13px 28px;{font};font-size:15px;font-weight:700;'
+                f'color:#ffffff;text-decoration:none;border-radius:8px">{e(cta_label)} &rarr;</a></td></tr></table></td></tr>')
+            rows.append(para(first, "text-align:center;font-size:14px;color:#4b5563;padding-top:10px"))
             continue
         if low.startswith(("fancy a quick", "worth a quick")):
             head, _, rest = first.partition("?")
@@ -1356,8 +1367,181 @@ def _email_branded_html(body: str, subject: str, brand: Dict[str, Any]) -> str:
         + "</table></td></tr></table></body></html>")
 
 
-def email_html(body: str, subject: str, brand: Dict[str, Any]) -> str:
-    return _email_branded_html(body, subject, brand) if st.session_state.get("opt_branded", True) else _email_plain_html(body)
+def email_html(body: str, subject: str, brand: Dict[str, Any], cta_label: Optional[str] = None) -> str:
+    if st.session_state.get("opt_branded", True):
+        return _email_branded_html(body, subject, brand, cta_label)
+    return _email_plain_html(body)
+
+
+# ==========================================
+# 2b. MONTHLY CAMPAIGNS (12-month series for existing customers)
+# ==========================================
+# Tokens: {first} {company} {brand} {crms} {or_call} {callscope_url}
+# "skip" = a service (see account_snapshot) or product words: customers who already have it are left out.
+CTA_LINE = "Just reply to this email and we'll help you get started{or_call}."
+
+CAMPAIGNS: List[Dict[str, Any]] = [
+    {"id": "m01", "month": 1, "focus": "Introduce the complete portfolio",
+     "subject": "There's more to SY Comms than business phones",
+     "cta": "Book a free 20-minute communications audit", "skip": None,
+     "body": "Hi {first},\n\nThanks for being a {brand} customer. Most people know us for business phones, but that's"
+             " only part of what we do for businesses like {company}.\n\nUnder one roof, and on one bill, we also look"
+             " after:\n\n- Connectivity: FTTP, SoGEA and Starlink, so your phones and team are never left offline.\n"
+             "- Smarter calls: AI call answering, Call Scope analytics and CRM integration.\n"
+             "- Mobile and IT: business mobiles, Microsoft 365, IT support and cyber security.\n"
+             "- On site: business Wi-Fi, networking and CCTV.\n\nA free 20-minute communications audit is the quickest"
+             " way to see where you could save time or money. We'll look at what you have today and suggest what's"
+             " worth changing, with no obligation.\n\n" + CTA_LINE},
+    {"id": "m02", "month": 2, "focus": "AI call answering",
+     "subject": "Who answers your calls when your team can't?",
+     "cta": "Arrange an AI answering demonstration", "skip": {"words": ("ai answer", "ai call")},
+     "body": "Hi {first},\n\nEvery missed call is a customer who might ring someone else. When the team at {company}"
+             " is busy, at lunch or out of hours, who's picking up?\n\nOur AI call answering steps in when your team"
+             " can't:\n\n- Answers every call: naturally, in your business name, day or night.\n"
+             "- Takes the details: who called, why, and the best way to get back to them.\n"
+             "- Sends them straight to you: by email or text, so nothing slips through.\n\nIt works alongside the phone"
+             " system you already have with us, so there's nothing new for your team to learn.\n\n" + CTA_LINE},
+    {"id": "m03", "month": 3, "focus": "Call Scope analytics and QC",
+     "subject": "Your calls contain more insight than you think",
+     "cta": "See Call Scope in action", "skip": {"service": "call_scope"},
+     "body": "Hi {first},\n\nYour phone system already knows a lot about your customers: when they call, how long"
+             " they wait and how many give up. Call Scope turns that into clear, simple insight.\n\nWith Call Scope,"
+             " {company} could:\n\n- See every call: answered, missed and abandoned, by person, team or time of day.\n"
+             "- Coach with confidence: listen back to recordings and score calls for quality.\n"
+             "- Staff to demand: spot your busiest times before customers start to wait.\n\n"
+             "See Call Scope in 60 seconds: {callscope_url}\n\n" + CTA_LINE},
+    {"id": "m04", "month": 4, "focus": "CRM integration",
+     "subject": "Your phone system and CRM should work together",
+     "cta": "Discuss your CRM integration", "skip": {"service": "integration"},
+     "body": "Hi {first},\n\nIf your team is still typing phone numbers or searching for customer records while"
+             " the caller waits, your phone system and CRM aren't working together yet.\n\nConnecting them means:\n\n"
+             "- Screen-pop: the caller's record appears before you even answer.\n"
+             "- Click-to-dial: call straight from your CRM, with no typing.\n"
+             "- Automatic logging: every call is saved against the right customer.\n\nWe connect to most popular"
+             " systems, including {crms}.\n\n" + CTA_LINE},
+    {"id": "m05", "month": 5, "focus": "FTTP, SoGEA and Starlink",
+     "subject": "Is your connection holding your business back?",
+     "cta": "Request a connectivity review", "skip": None,
+     "body": "Hi {first},\n\nSlow uploads, dropped video calls and the odd outage all cost time. With the analogue"
+             " phone network switching off by January 2027, now is a good moment to make sure {company}'s connection"
+             " is ready.\n\nDepending on your location, we can offer:\n\n"
+             "- FTTP: full fibre to your premises, for the fastest and most reliable speeds.\n"
+             "- SoGEA: fibre broadband without the old analogue phone line.\n"
+             "- Starlink: satellite broadband for rural sites, or as a backup line.\n\nWe'll check what's available"
+             " at your address and recommend the best fit for how you work.\n\n" + CTA_LINE},
+    {"id": "m06", "month": 6, "focus": "Hosted PBX and modern handsets",
+     "subject": "A better phone system starts with better design",
+     "cta": "Book a phone system review", "skip": None,
+     "body": "Hi {first},\n\nA phone system should fit the way your business works today: hybrid teams, busy"
+             " periods and customers who expect a quick answer.\n\nA phone system review for {company} looks at:\n\n"
+             "- Call flows: menus, queues and groups that get callers to the right person first time.\n"
+             "- Modern handsets: desk, cordless and headset options your team will enjoy using.\n"
+             "- Room to grow: add users, sites and features without new hardware.\n\nSmall changes to how calls are"
+             " routed often make a big difference to how your business sounds to customers.\n\n" + CTA_LINE},
+    {"id": "m07", "month": 7, "focus": "Business Wi-Fi and networks",
+     "subject": "Fast broadband. Slow Wi-Fi. Sound familiar?",
+     "cta": "Arrange a network assessment", "skip": None,
+     "body": "Hi {first},\n\nA fast broadband line is only half the story. If the Wi-Fi drops in the meeting room or"
+             " slows to a crawl at busy times, your team feels it.\n\nA network assessment covers:\n\n"
+             "- Coverage: finding dead spots and weak signal across your site.\n"
+             "- Performance: making sure calls, video and cloud apps get the bandwidth they need.\n"
+             "- Security: separate guest Wi-Fi and a properly managed firewall.\n\nWe'll tell you what's worth"
+             " fixing, and what's fine as it is.\n\n" + CTA_LINE},
+    {"id": "m08", "month": 8, "focus": "Mobile apps and flexible working",
+     "subject": "Your business number, wherever work takes you",
+     "cta": "Request a mobile working demo", "skip": None,
+     "body": "Hi {first},\n\nYour team doesn't always work from the office, but your business number should always"
+             " work for them.\n\nWith our mobile app, the team at {company} can:\n\n"
+             "- Call from your business number: on any mobile, without giving out personal numbers.\n"
+             "- Transfer and pick up calls: just as they would at their desk.\n"
+             "- Set their availability: so calls reach the right person at the right time.\n\nIt's the phone system"
+             " you already have, just in your pocket.\n\n" + CTA_LINE},
+    {"id": "m09", "month": 9, "focus": "Microsoft 365, IT support and cyber security",
+     "subject": "Keep your team connected, and your business protected",
+     "cta": "Book an IT review", "skip": {"words": ("it services", "it support", "managed it")},
+     "body": "Hi {first},\n\nYour phones are in safe hands. Is the rest of your IT?\n\nAlongside your phones, we can"
+             " look after:\n\n- Microsoft 365: email, Teams and file sharing, set up and managed for you.\n"
+             "- IT support: a friendly helpdesk for when something stops working.\n"
+             "- Cyber security: backups, protection and staff awareness to keep your data safe.\n\nOne supplier for"
+             " phones and IT means one number to call when you need help.\n\n" + CTA_LINE},
+    {"id": "m10", "month": 10, "focus": "Live wallboards and dashboards",
+     "subject": "See what's happening before customers chase you",
+     "cta": "See a dashboard demonstration", "skip": None,
+     "body": "Hi {first},\n\nBy the time a customer chases you, the problem has usually been building for a while."
+             " Live wallboards and dashboards show it as it happens.\n\nOn a screen in the office or in a browser,"
+             " {company} could see:\n\n- Calls waiting: and how long callers have been in the queue.\n"
+             "- Who's available: and who's on a call, at a glance.\n"
+             "- Today's numbers: answered, missed and returned calls, live.\n\nIt's much easier to stay on top of"
+             " the queue when everyone can see it.\n\n" + CTA_LINE},
+    {"id": "m11", "month": 11, "focus": "CCTV and site infrastructure",
+     "subject": "A clearer view of your premises",
+     "cta": "Discuss your site requirements", "skip": {"service": "cctv"},
+     "body": "Hi {first},\n\nWhether it's the car park, the stockroom or the front door, a clear view of your"
+             " premises gives you peace of mind.\n\nWe supply, install and support:\n\n"
+             "- HD CCTV: sharp images day and night, viewable from your phone.\n"
+             "- Reliable recording: footage stored securely and easy to find when you need it.\n"
+             "- Site infrastructure: cabling, network points and comms cabinets, done properly.\n\nWe'll visit, look"
+             " at your site and recommend only what you need.\n\n" + CTA_LINE},
+    {"id": "m12", "month": 12, "focus": "Combined services and annual review",
+     "subject": "What could your business do better next year?",
+     "cta": "Book a technology planning meeting", "skip": None,
+     "body": "Hi {first},\n\nAs the year draws to a close, it's a good time to look at what's working for {company},"
+             " and what could work better.\n\nA technology planning meeting covers:\n\n"
+             "- What you have today: phones, connectivity, mobiles and IT, all in one place.\n"
+             "- What's changing: contract dates, the January 2027 analogue switch-off and your plans for growth.\n"
+             "- What could be better: simpler bills, better tools and fewer suppliers.\n\nYou'll leave with a clear"
+             " plan for next year, with no obligation to change anything.\n\n" + CTA_LINE},
+]
+CAMPAIGN_BY_ID = {c["id"]: c for c in CAMPAIGNS}
+
+
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def campaign_copy(camp: Dict[str, Any], overrides: Dict[str, Any]) -> Tuple[str, str]:
+    """(subject template, body template), with any saved edits applied."""
+    o = (overrides or {}).get(camp["id"]) or {}
+    return o.get("subject") or camp["subject"], o.get("body") or camp["body"]
+
+
+def campaign_has_it(camp: Dict[str, Any], snap: Dict[str, Any]) -> bool:
+    skip = camp.get("skip") or {}
+    if skip.get("service"):
+        return snap["has"].get(skip["service"]) is True
+    if skip.get("words"):
+        return any(w in (snap.get("services_text") or "") for w in skip["words"])
+    return False
+
+
+def build_campaign_email(camp: Dict[str, Any], overrides: Dict[str, Any], acct: Dict[str, Any],
+                         contact: Dict[str, Any], brand: Dict[str, Any], prof: Dict[str, Any]) -> Tuple[str, str]:
+    subj_t, body_t = campaign_copy(camp, overrides)
+    crms = prof["crms"]
+    vals = _SafeDict(
+        first=(contact.get("First_Name") or "").strip() or "there",
+        company=(acct.get("Account_Name") or "your business").strip(),
+        brand=brand["name"],
+        crms=", ".join(crms[:2]) + f" and {crms[2]}" if len(crms) >= 3 else " and ".join(crms),
+        or_call=f", or call us on {brand['phone']}" if brand.get("phone") else "",
+        callscope_url=_secret_value("CALLSCOPE_URL", CALLSCOPE_URL_DEFAULT),
+    )
+    subject = subj_t.format_map(vals)
+    sender = get_sender()
+    sig = ["Kind regards,"]
+    if sender.get("name"):
+        sig += ["", sender["name"]] + ([sender["title"]] if sender.get("title") else [])
+    sig.append(brand["name"])
+    line = " | ".join(x for x in (brand.get("phone"), brand.get("email")) if x)
+    if line:
+        sig.append(line)
+    if brand.get("website"):
+        sig.append(brand["website"])
+    body = (body_t.format_map(vals) + "\n\n" + "\n".join(sig)
+            + "\n\nP.S. If you'd rather not get emails like this, just reply \"no thanks\" and we'll take you off the list.")
+    return subject, body
+
 
 
 # ==========================================
@@ -1733,6 +1917,308 @@ def show_push_result(origin: str) -> None:
         st.warning(p)
 
 
+# ---------------- Campaigns ----------------
+CAMP_LOG = SentLog("GITHUB_CG_CAMPAIGN_PATH", "cg_campaign_log.json", ".cg_campaign_log.json")
+CAMPAIGN_GAP_DAYS = 14  # No one-to-one upsell within this many days of a campaign email (and vice versa)
+
+
+def get_camp_log() -> Dict[str, Any]:
+    if "camp_log_data" not in st.session_state:
+        st.session_state["camp_log_data"] = CAMP_LOG.load()
+    return st.session_state["camp_log_data"]
+
+
+def record_campaign(changes: Dict[str, Dict[str, Any]]) -> None:
+    try:
+        st.session_state["camp_log_data"] = CAMP_LOG.apply(changes, f"Customer Growth: {len(changes)} campaign emails")
+    except Exception as exc:
+        st.session_state.setdefault("camp_log_data", {}).update(changes)
+        st.session_state["sent_log_error"] = str(exc) if isinstance(exc, RuntimeError) else "Couldn't save the campaign log."
+    st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
+
+
+def total_sent_today() -> int:
+    """Zoho's 100-a-day allowance is shared by one-to-one emails and campaigns."""
+    today = now_uk().date().isoformat()
+    camp = sum(1 for r in get_camp_log().values() if str(r.get("sent_at", "")).startswith(today))
+    return zoho_sent_today(get_sent_log()) + camp
+
+
+def last_campaign_contact(aid: str, exclude: str = "") -> Optional[datetime]:
+    """When this account last got any campaign email (other than campaign `exclude`)."""
+    best = None
+    for r in get_camp_log().values():
+        if r.get("account_id") != aid or r.get("campaign") == exclude:
+            continue
+        try:
+            t = datetime.fromisoformat(r["sent_at"])
+        except (KeyError, ValueError):
+            continue
+        best = t if best is None or t > best else best
+    return best
+
+
+def campaigns_for_account(aid: str) -> List[str]:
+    return sorted({r.get("campaign") for r in get_camp_log().values() if r.get("account_id") == aid and r.get("campaign")})
+
+
+def campaign_audience(camp: Dict[str, Any], accts: List[Dict[str, Any]], all_contacts: bool, skip_has: bool,
+                      min_in: Optional[int], gap_days: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(recipients, skipped). Each recipient: account + contact, with its sent record if already sent."""
+    log, upsell = get_camp_log(), get_sent_log()
+    cba = st.session_state.get("contacts_by_acct", {})
+    rec_rows, skipped = [], []
+    for a in accts:
+        snap = a["_snap"]
+        contacts = [c for c in rank_contacts(cba.get(a["id"], [])) if not c.get("Email_Opt_Out") and c.get("Email")]
+        sent_here = [c for c in contacts if f"{camp['id']}|{c.get('id')}" in log]
+        name = a.get("Account_Name", "")
+        if not sent_here:  # Already-sent accounts always stay in the list (that's the progress)
+            reason = None
+            if not contacts:
+                reason = "No contact email (or opted out)"
+            elif skip_has and campaign_has_it(camp, snap):
+                reason = "Already has it"
+            elif min_in is not None and snap["months_in"] is not None and snap["months_in"] < min_in:
+                reason = "New customer"
+            else:
+                recent = [last_campaign_contact(a["id"], exclude=camp["id"])]
+                rec = upsell.get(a["id"])
+                if rec:
+                    try:
+                        recent.append(datetime.fromisoformat(rec["sent_at"]))
+                    except (KeyError, ValueError):
+                        pass
+                recent = [t for t in recent if t]
+                if recent and (now_uk() - max(recent)).days < gap_days:
+                    reason = f"Emailed in the last {gap_days} days"
+            if reason:
+                skipped.append({"Customer": name, "Type": a.get("_type", ""), "Why skipped": reason})
+                continue
+        for c in (contacts if all_contacts else (sent_here or contacts[:1])):
+            key = f"{camp['id']}|{c.get('id')}"
+            rec_rows.append({"key": key, "acct": a, "contact": c, "sent": log.get(key)})
+    return rec_rows, skipped
+
+
+def send_campaign(camp: Dict[str, Any], rows: List[Dict[str, Any]], overrides: Dict[str, Any], default_from_idx: int) -> None:
+    senders, _ = zoho_senders()
+    who = get_sender().get("name") or "Customer Growth"
+    stamp = now_uk().strftime("%d %b %Y %H:%M")
+    done, problems = [], []
+    changes: Dict[str, Dict[str, Any]] = {}
+    progress = st.progress(0.0, text="Sending the campaign through Zoho…")
+    for n, r in enumerate(rows, start=1):
+        a, c = r["acct"], r["contact"]
+        brand, _ = brand_for(a.get("_type") or "")
+        name = a.get("Account_Name", "customer")
+        progress.progress(n / len(rows), text=f"Sending {n} of {len(rows)} · {name}")
+        subject, body = build_campaign_email(camp, overrides, a, c, brand, a["_snap"]["profile"])
+        sender = pick_from(senders, brand, default_from_idx)
+        if not sender:
+            problems.append(f"{name}: no From address available in Zoho")
+            continue
+        try:
+            ZOHO.send_mail("Contacts", str(c["id"]), sender, c["Email"], contact_name(c), subject,
+                           email_html(body, subject, brand, cta_label=camp["cta"]))
+        except ZohoError as exc:
+            problems.append(f"{name}: not sent. {exc}")
+            continue
+        try:
+            ZOHO.add_note("Accounts", a["id"], f"Campaign sent: {camp['focus']}",
+                          f"Month {camp['month']} campaign \"{camp['focus']}\" emailed to {contact_name(c) or c['Email']}"
+                          f" ({c['Email']}) on {stamp}, by {who}.\nBrand: {brand['name']} (from {sender.get('email')})"
+                          f"\nSubject: {subject}")
+        except ZohoError as exc:
+            problems.append(f"{name}: sent, but the note wasn't added. {exc}")
+        changes[r["key"]] = {"campaign": camp["id"], "account_id": a["id"], "account": name,
+                             "contact": contact_name(c), "to": c["Email"], "brand": brand["name"],
+                             "subject": subject, "sent_at": now_uk().isoformat(timespec="seconds"), "sent_by": who}
+        done.append(name)
+    progress.empty()
+    if changes:
+        record_campaign(changes)
+    st.session_state["camp_result"] = {"done": done, "problems": problems}
+
+
+def render_campaigns() -> None:
+    accts_all = st.session_state.get("accts") or []
+    overrides = get_settings().get("campaign_copy") or {}
+    log = get_camp_log()
+    with st.container(key="card-select"):
+        section_header("02", "Monthly campaign", "Pick the campaign, check who it's going to, then send in batches.")
+        if not accts_all:
+            st.caption("Load your customers above first.")
+            return
+        sent_per = {c["id"]: sum(1 for k in log if k.startswith(c["id"] + "|")) for c in CAMPAIGNS}
+        ids = [c["id"] for c in CAMPAIGNS]
+        cid = st.selectbox("Campaign", ids, key="camp_pick",
+                           format_func=lambda i: f"Month {CAMPAIGN_BY_ID[i]['month']} · {CAMPAIGN_BY_ID[i]['focus']}"
+                                                 + (f"   ({sent_per[i]} sent)" if sent_per[i] else ""))
+        camp = CAMPAIGN_BY_ID[cid]
+        subj_t, _ = campaign_copy(camp, overrides)
+        render_html(f'<div class="pe-panel"><div class="h">Subject</div><div style="font-weight:700">{esc(subj_t)}</div>'
+                    f'<div class="h" style="margin-top:10px">Button</div><div>{esc(camp["cta"])} → (opens a reply)</div></div>')
+
+        type_counts: Dict[str, int] = {}
+        for a in accts_all:
+            type_counts[a.get("_type") or "—"] = type_counts.get(a.get("_type") or "—", 0) + 1
+        c1, c2 = st.columns(2)
+        with c1:
+            types = st.multiselect("Customer types", sorted(type_counts), default=sorted(type_counts), key="camp_types",
+                                   format_func=lambda t: f"{t} ({type_counts[t]})")
+        with c2:
+            who_to = st.selectbox("Send to", ["Main contact per customer", "Every contact with an email"], key="camp_who",
+                                  help="Main contact = owner / director / partner first, then managers.")
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            skip_has = st.toggle("Skip if they already have it", value=bool(camp.get("skip")), disabled=not camp.get("skip"),
+                                 key=f"camp_skip_{cid}", help="e.g. existing Call Scope customers don't get the Call Scope month.")
+        with d2:
+            f_min = st.selectbox("Customer for at least", ["Any", "3 months", "6 months", "1 year"], index=1, key="camp_min")
+        with d3:
+            gap = st.selectbox("Not if emailed in the last", ["7 days", "14 days", "30 days"], index=1, key="camp_gap",
+                               help="Any one-to-one upsell or other campaign email.")
+        min_in = {"Any": None, "3 months": 3, "6 months": 6, "1 year": 12}[f_min]
+        gap_days = int(gap.split()[0])
+        accts = [a for a in accts_all if (a.get("_type") or "—") in types]
+        rows, skipped = campaign_audience(camp, accts, who_to.startswith("Every"), skip_has, min_in, gap_days)
+        sent_rows = [r for r in rows if r["sent"]]
+        pending = [r for r in rows if not r["sent"]]
+
+        # ---- The countdown ----
+        total = len(rows)
+        pct = (len(sent_rows) / total) if total else 0
+        render_html(
+            '<div class="pe-stats" style="margin-top:8px">'
+            f'<div class="pe-stat"><div class="v">{len(sent_rows)}</div><div class="l">Sent</div></div>'
+            f'<div class="pe-stat"><div class="v">{len(pending)}</div><div class="l">Left to send</div></div>'
+            f'<div class="pe-stat"><div class="v">{total}</div><div class="l">In this campaign</div></div>'
+            "</div>")
+        st.progress(pct, text=f"Month {camp['month']}: {camp['focus']} · {len(sent_rows)} of {total} sent · {len(pending)} left")
+
+        res = st.session_state.pop("camp_result", None)
+        if res:
+            if res["done"]:
+                st.success(f"{len(res['done'])} campaign emails sent via Zoho.")
+            for p_ in res["problems"]:
+                st.warning(p_)
+
+        if pending:
+            pdf = pd.DataFrame([{
+                "key": r["key"], "Send": True, "Customer": r["acct"].get("Account_Name", ""),
+                "Contact": contact_name(r["contact"]), "Email": r["contact"].get("Email", ""),
+                "Brand": brand_for(r["acct"].get("_type") or "")[0]["name"], "Type": r["acct"].get("_type", ""),
+            } for r in pending])
+            st.caption("Untick anyone you don't want in this campaign. Everyone else goes out in batches until the list is empty.")
+            edited = _data_editor(pdf, hide_index=True, num_rows="fixed", key=f"camp_tbl_{cid}_{st.session_state['sent_log_ver']}",
+                                  height=min(38 + 35 * len(pdf), 360), column_order=["Send", "Customer", "Contact", "Email", "Brand", "Type"],
+                                  disabled=["Customer", "Contact", "Email", "Brand", "Type"],
+                                  column_config={"Send": st.column_config.CheckboxColumn("Send", width="small")})
+            chosen_keys = set(edited.loc[edited["Send"], "key"])
+            chosen = [r for r in pending if r["key"] in chosen_keys]
+            senders, s_err = zoho_senders()
+            if s_err:
+                st.error(s_err)
+            else:
+                left_today = max(0, ZOHO_SEND_LIMIT - total_sent_today())
+                b1, b2 = columns([1, 1.4])
+                with b1:
+                    max_n = max(1, min(len(chosen), left_today))
+                    n = st.number_input("Send this many now", min_value=1, max_value=max_n, value=min(25, max_n),
+                                        disabled=not chosen or not left_today, key=f"camp_n_{cid}")
+                with b2:
+                    label = f"🚀  Send the next {min(int(n), len(chosen))}"
+                    try:
+                        pop = st.popover(label, key=f"camp_pop_{st.session_state['sent_log_ver']}",
+                                         disabled=not chosen or not left_today, **FULL_WIDTH)
+                    except TypeError:
+                        pop = st.popover(label, disabled=not chosen or not left_today, **FULL_WIDTH)
+                    with pop:
+                        st.markdown(f"Send **Month {camp['month']}: {esc(camp['focus'])}** to the next "
+                                    f"**{min(int(n), len(chosen))}** customers, each in their own brand?")
+                        st.caption("This can't be undone. Each email is logged on the contact, with a note on the account.")
+                        if st.button("Yes, send them now", type="primary", key="camp_go", **FULL_WIDTH):
+                            send_campaign(camp, chosen[:int(n)], overrides, st.session_state.get("zs_from", 0))
+                            st.rerun()
+                if senders:
+                    st.selectbox("Send from (when a brand's own address isn't set up in Zoho)", list(range(len(senders))),
+                                 key="zs_from",
+                                 format_func=lambda i: f"{senders[i].get('user_name') or ''} <{senders[i]['email']}>".strip())
+                st.caption(f"Zoho sends today: {total_sent_today()} of {ZOHO_SEND_LIMIT} (shared with one-to-one emails)."
+                           + ("" if left_today else " Today's allowance is used up, so carry on tomorrow."))
+        elif total:
+            st.success("🎉 This campaign has gone to everyone on the list.")
+
+        if sent_rows:
+            with st.expander(f"✓ Already sent ({len(sent_rows)})"):
+                sdf = pd.DataFrame([{"Customer": r["acct"].get("Account_Name", ""), "Contact": r["sent"].get("contact", ""),
+                                     "Email": r["sent"].get("to", ""), "Sent": fmt_when_iso(r["sent"].get("sent_at", "")),
+                                     "By": r["sent"].get("sent_by", "")} for r in sent_rows])
+                _dataframe(sdf, hide_index=True)
+        if skipped:
+            with st.expander(f"Skipped ({len(skipped)})"):
+                _dataframe(pd.DataFrame(skipped), hide_index=True)
+
+        # ---- Everything sent so far, all campaigns ----
+        with st.expander("📊 All campaigns: who has had what"):
+            overview = pd.DataFrame([{"Month": c["month"], "Campaign": c["focus"], "Sent": sent_per[c["id"]],
+                                      "Last sent": fmt_when_iso(max((r.get("sent_at", "") for k, r in log.items()
+                                                                     if k.startswith(c["id"] + "|")), default=""))}
+                                     for c in CAMPAIGNS])
+            _dataframe(overview, hide_index=True)
+            if log:
+                full = pd.DataFrame([{"Campaign": f"Month {CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('month', '?')}: "
+                                                  f"{CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('focus', r.get('campaign'))}",
+                                      "Customer": r.get("account", ""), "Contact": r.get("contact", ""), "Email": r.get("to", ""),
+                                      "Brand": r.get("brand", ""), "Sent": r.get("sent_at", ""), "By": r.get("sent_by", "")}
+                                     for r in log.values()])
+                st.download_button("⬇ Download the full campaign log (.csv)", full.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"Customer_Growth_campaign_log_{now_uk().strftime('%Y-%m-%d')}.csv", mime="text/csv")
+
+    # ---- Right: preview + edit copy ----
+    with col_right:
+        with st.container(key="card-right"):
+            section_header("03", "Email preview", "Exactly what the next customer will receive.")
+            sample = (pending or rows or [None])[0]
+            if sample:
+                a, c = sample["acct"], sample["contact"]
+                brand, fb = brand_for(a.get("_type") or "")
+                subject, body = build_campaign_email(camp, overrides, a, c, brand, a["_snap"]["profile"])
+                st.caption(f"Showing: {a.get('Account_Name', '')} · {contact_name(c)} · {brand['name']}"
+                           + (" (brand details not filled in, so SY Communications is used)" if fb else ""))
+                render_html(f'<div class="pe-panel"><div class="h">Subject</div><div style="font-weight:700">{esc(subject)}</div></div>')
+                st.session_state["opt_branded"] = st.toggle("Branded email design", value=st.session_state["opt_branded"],
+                                                            key="w_opt_branded_c")
+                components.html(email_html(body, subject, brand, cta_label=camp["cta"]), height=900, scrolling=True)
+            with st.expander("✏️  Edit this campaign's wording"):
+                st.caption("Use {first}, {company}, {brand}, {crms}, {or_call} and {callscope_url}; they're filled in for each"
+                           " customer. Lines starting \"- Title: text\" become the highlighted cards. Signature and opt-out"
+                           " line are added automatically. Saved for everyone.")
+                s_t, b_t = campaign_copy(camp, overrides)
+                with st.form(f"camp_edit_{cid}", border=False):
+                    new_s = st.text_input("Subject", value=s_t)
+                    new_b = st.text_area("Email", value=b_t, height=380)
+                    ec1, ec2 = st.columns(2)
+                    save = ec1.form_submit_button("Save wording", type="primary")
+                    reset = ec2.form_submit_button("Reset to original")
+                if save or reset:
+                    new_over = dict(overrides)
+                    if reset:
+                        new_over.pop(cid, None)
+                    else:
+                        new_over[cid] = {"subject": new_s, "body": new_b}
+                    err_ = save_settings("campaign_copy", new_over)
+                    (st.warning(f"Saved for this session only: {err_}") if err_ else st.rerun())
+
+
+def fmt_when_iso(iso: str) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%d %b %Y %H:%M").lstrip("0")
+    except (TypeError, ValueError):
+        return ""
+
+
 def render_zoho_setup() -> None:
     render_html(
         '<div class="pe-panel"><div class="h">One-off Zoho setup</div>'
@@ -1768,12 +2254,37 @@ def fmt_date(d: Optional[datetime]) -> str:
     return d.strftime("%d %b %Y").lstrip("0") if d else "—"
 
 
+def render_late() -> None:
+    queue_ = st.session_state.get("queue", {})
+    if st.session_state.get("view") == "campaigns":
+        step = 4 if get_camp_log() else 2 if st.session_state.get("accts") else 1
+    else:
+        step = 4 if queue_ else 3 if st.session_state.get("selected_any") else 2 if st.session_state.get("accts") else 1
+    render_html(hero_html(step), target=hero_slot)
+    render_html(
+        '<div class="pe-stats">'
+        f'<div class="pe-stat"><div class="v">{len(st.session_state.get("accts") or [])}</div><div class="l">Loaded</div></div>'
+        f'<div class="pe-stat"><div class="v">{len(queue_)}</div><div class="l">In review</div></div>'
+        f'<div class="pe-stat"><div class="v">{total_sent_today()}</div><div class="l">Sent today</div></div>'
+        "</div>",
+        target=sidebar_stats_slot,
+    )
+
+
 # ---------------- Sidebar ----------------
 with st.sidebar:
     render_html(
         f'<div class="pe-brand"><div class="pe-logo">{icon("target", 22, 2.2)}</div>'
         f'<div><div class="n">{APP_NAME}</div><div class="s">{APP_TAGLINE}</div></div></div>'
     )
+    if "view" not in st.session_state:
+        st.session_state["view"] = "campaigns" if st.query_params.get("view") == "campaigns" else "upsell"
+    st.session_state["view"] = st.radio(
+        "Workspace", ["upsell", "campaigns"], key="w_view", label_visibility="collapsed",
+        index=0 if st.session_state["view"] == "upsell" else 1,
+        format_func=lambda v: "🎯  One-to-one upsell" if v == "upsell" else "📣  Monthly campaigns")
+    if st.query_params.get("view", "upsell") != st.session_state["view"]:
+        st.query_params["view"] = st.session_state["view"]
     render_html('<div class="pe-side-h">Connections</div>')
     zoho_state = ('idle">Setup needed' if ZOHO.can_setup else 'off">Not set up' if not ZOHO.configured
                   else 'ok">Connected' if st.session_state.get("acct_fields") else 'idle">Ready')
@@ -1789,7 +2300,7 @@ with st.sidebar:
     if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
         st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
     if st.button("↻ Refresh shared data", **FULL_WIDTH, help="Pick up colleagues' sends and settings."):
-        for k in ("sent_log_data", "settings_data", "zoho_from", "acct_fields"):
+        for k in ("sent_log_data", "settings_data", "zoho_from", "acct_fields", "camp_log_data"):
             st.session_state.pop(k, None)
         bump()
         st.rerun()
@@ -1988,6 +2499,11 @@ with col_left:
                             it["sig"] = None
                         (st.warning(f"Saved for this session only: {e_}") if e_ else st.success(f"{vals['name']} saved."))
 
+    if st.session_state.get("view") == "campaigns":
+        render_campaigns()
+        render_late()
+        st.stop()
+
     accts_all = st.session_state.get("accts") or []
     if accts_all:
         with st.container(key="card-select"):
@@ -2035,6 +2551,9 @@ with col_left:
             cool_days = {"30 days": 30, "60 days": 60, "90 days": 90, "6 months": 182, "Don't hide": None}[f_cool]
 
             def _recent(aid: str) -> bool:
+                last_c = last_campaign_contact(aid)
+                if last_c and (now_uk() - last_c).days < CAMPAIGN_GAP_DAYS:
+                    return True  # Had a campaign email very recently
                 rec = log_now.get(aid)
                 if not rec or cool_days is None:
                     return False
@@ -2154,6 +2673,8 @@ with col_right:
                 meta.append(chip(f"Customer {yrs:.1f} yrs" if yrs >= 1 else f"Customer {int(snap['months_in'])} mths", "muted"))
             if aid in log_now:
                 meta.append(chip(f"Emailed {sent_label(log_now[aid])[2:]}", "good"))
+            for cid_ in campaigns_for_account(aid):
+                meta.append(chip(f"Campaign M{CAMPAIGN_BY_ID.get(cid_, {}).get('month', '?')} ✓", "muted"))
             render_html(f'<div class="pe-firm"><div><div class="name">{esc(acct.get("Account_Name", ""))}</div>'
                         f'<div class="meta">{"".join(meta)}</div></div></div>')
             z1, z2 = columns([1.7, 1])
@@ -2308,7 +2829,7 @@ if queue:
                         st.caption("ℹ️ Zoho has no From address for " + ", ".join(unmatched)
                                    + ", so those go from the address above. Add the brand's address in Zoho"
                                      " (Setup → Channels → Email → Organization Emails) to send as the brand.")
-                    sent_today = zoho_sent_today(log_now)
+                    sent_today = total_sent_today()
                     left = max(0, ZOHO_SEND_LIMIT - sent_today)
                     ids = sel_ids[:left]
                     if len(sel_ids) > left:
@@ -2360,13 +2881,4 @@ if queue:
             st.rerun()
 
 # ---------------- Late-rendered pieces ----------------
-active_step = 4 if queue else 3 if st.session_state.get("selected_any") else 2 if st.session_state.get("accts") else 1
-render_html(hero_html(active_step), target=hero_slot)
-render_html(
-    '<div class="pe-stats">'
-    f'<div class="pe-stat"><div class="v">{len(st.session_state.get("accts") or [])}</div><div class="l">Loaded</div></div>'
-    f'<div class="pe-stat"><div class="v">{len(queue)}</div><div class="l">In review</div></div>'
-    f'<div class="pe-stat"><div class="v">{zoho_sent_today(get_sent_log())}</div><div class="l">Sent today</div></div>'
-    "</div>",
-    target=sidebar_stats_slot,
-)
+render_late()
