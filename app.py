@@ -1589,6 +1589,38 @@ def type_matches(value: Any, wanted: Set[str]) -> bool:
     return any(value_text(v) in wanted for v in vals)
 
 
+EXCLUDE_TAGS_DEFAULT = "dead, do not contact"
+
+
+def exclude_tag_words() -> List[str]:
+    raw = get_settings().get("exclude_tags")
+    raw = EXCLUDE_TAGS_DEFAULT if raw is None else raw
+    return [w.strip().lower() for w in str(raw).split(",") if w.strip()]
+
+
+def _tag_names(rec: Dict[str, Any]) -> List[str]:
+    tags = rec.get("Tag") or []
+    return [str(t.get("name") if isinstance(t, dict) else t) for t in tags if t]
+
+
+def tagged_out(module: str, words: List[str]) -> Tuple[Dict[str, List[str]], Optional[str]]:
+    """{record id: matching tag names} for records whose tags contain any of the words (e.g. 'DEAD ACCOUNT').
+    Read with the Get Records API, which always returns tags. Returns (matches, error)."""
+    if not words:
+        return {}, None
+    name_field = "Account_Name" if module == "Accounts" else "Last_Name"
+    try:
+        recs = ZOHO.get_records(module, [name_field, "Tag"])
+    except ZohoError as exc:
+        return {}, str(exc)
+    out: Dict[str, List[str]] = {}
+    for rid, r in recs.items():
+        hits = [t for t in _tag_names(r) if any(w in t.lower() for w in words)]
+        if hits:
+            out[str(rid)] = hits
+    return out, None
+
+
 def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Fast path is COQL. If Zoho refuses the query for any reason, fall back to reading every account with the
     Get Records API (slower, but it accepts any field) and filter by type here."""
@@ -1609,15 +1641,29 @@ def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Di
     for a in accts:
         vals = [aliases.get(value_text(v), value_text(v)) for v in (a.get(tf) if isinstance(a.get(tf), list) else [a.get(tf)])]
         a["_type"] = next((v for v in vals if v in types), vals[0] if vals else "")
+    # Leave out accounts tagged e.g. DEAD ACCOUNT / DEAD CUSTOMER / DO NOT CONTACT
+    words = exclude_tag_words()
+    dead, err = tagged_out("Accounts", words)
+    st.session_state["tag_check_error"] = err
+    st.session_state["excluded_tagged"] = [
+        {"Customer": a.get("Account_Name", ""), "Type": a.get("_type", ""), "Tag": ", ".join(dead[str(a.get("id"))])}
+        for a in accts if str(a.get("id")) in dead]
+    accts = [a for a in accts if str(a.get("id")) not in dead]
     return accts, skipped
 
 
 def load_contacts() -> List[Dict[str, Any]]:
     try:
-        return ZOHO.query_all("Contacts", CONTACT_FIELDS, "Email is not null")
+        out = ZOHO.query_all("Contacts", CONTACT_FIELDS, "Email is not null")
     except ZohoError:
         recs = ZOHO.get_records("Contacts", CONTACT_FIELDS)
-        return [r for r in recs.values() if (r.get("Email") or "").strip()]
+        out = [r for r in recs.values() if (r.get("Email") or "").strip()]
+    # Contacts tagged dead / do not contact are left out too
+    dead, err = tagged_out("Contacts", exclude_tag_words())
+    if err:
+        st.session_state["tag_check_error"] = st.session_state.get("tag_check_error") or err
+    st.session_state["excluded_contacts"] = sum(1 for c in out if str(c.get("id")) in dead)
+    return [c for c in out if str(c.get("id")) not in dead]
 
 
 def _load_accounts_coql(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Dict[str, str],
@@ -2391,6 +2437,9 @@ with col_left:
                 if st.session_state.get("load_diag"):
                     with st.expander("Technical details"):
                         st.caption(st.session_state.pop("load_diag"))
+                if st.session_state.get("tag_check_error"):
+                    st.error("⚠️ Couldn't read Zoho tags, so accounts tagged DEAD may be included. Don't send a campaign"
+                             " until this loads cleanly. (" + str(st.session_state["tag_check_error"]) + ")")
                 if skipped_fields:
                     st.warning("Zoho wouldn't let the app read: " + ", ".join(skipped_fields)
                                + ". Those services show as 'not recorded'. Pick a different field in the mapping if you can.")
@@ -2415,6 +2464,15 @@ with col_left:
                         st.warning("No accounts with those types.")
 
             accts_all = st.session_state.get("accts") or []
+            _excl = st.session_state.get("excluded_tagged") or []
+            _excl_c = st.session_state.get("excluded_contacts") or 0
+            if accts_all and (_excl or _excl_c):
+                with st.expander(f"🚫  Left out: {len(_excl)} tagged account{'s' if len(_excl) != 1 else ''}"
+                                 + (f" and {_excl_c} tagged contact{'s' if _excl_c != 1 else ''}" if _excl_c else "")
+                                 + " (" + ", ".join(w.upper() for w in exclude_tag_words()) + ")"):
+                    if _excl:
+                        _dataframe(pd.DataFrame(_excl), hide_index=True)
+                    st.caption("These never appear in upsell lists or campaigns. Change the words under 🚫 Excluded tags.")
             if accts_all:
                 cba = st.session_state.get("contacts_by_acct", {})
                 with_email = sum(1 for a in accts_all if any(not c.get("Email_Opt_Out") for c in cba.get(a["id"], [])))
@@ -2425,6 +2483,23 @@ with col_left:
                     f'<div class="pe-stat"><div class="v">{with_email:,}</div><div class="l">With a contact email</div></div>'
                     f'<div class="pe-stat"><div class="v">{renewing:,}</div><div class="l">Renewing ≤ 12 months</div></div>'
                     "</div>")
+
+            # ---- Excluded tags (shared) ----
+            with st.expander("🚫  Excluded tags  ·  " + (", ".join(exclude_tag_words()) or "none"), expanded=False):
+                st.caption("Accounts or contacts with a Zoho tag containing any of these words are never loaded,"
+                           " e.g. 'dead' catches DEAD ACCOUNT and DEAD CUSTOMER. Separate words with commas.")
+                ex1, ex2 = columns([2.2, 1])
+                with ex1:
+                    new_words = st.text_input("Leave out tags containing", value=", ".join(exclude_tag_words()),
+                                              key="excl_tags_in")
+                with ex2:
+                    if st.button("Save", key="excl_tags_save", **FULL_WIDTH,
+                                 disabled=new_words.strip().lower() == ", ".join(exclude_tag_words())):
+                        err = save_settings("exclude_tags", new_words.strip())
+                        st.session_state.pop("accts", None)
+                        if err:
+                            st.warning(f"Saved for this session only: {err}")
+                        st.rerun()
 
             # ---- Field mapping (once, shared) ----
             with st.expander("⚙️  Zoho field mapping" + ("" if fmap_saved else "  ·  using SY Comms defaults"), expanded=False):
