@@ -1738,9 +1738,26 @@ def bump() -> None:
 
 
 # ---------- shared stores ----------
+def save_log_quietly(store: "SentLog", changes: Dict[str, Any], message: str) -> None:
+    """Used when the page is stopping mid-send (e.g. someone switched page): Streamlit calls aren't allowed then,
+    so save straight to GitHub and flag every session to reload the log on its next run."""
+    import sys as _sys
+    try:
+        store.apply(changes, message)
+    except Exception:
+        return
+    _sys._sy_log_epoch = getattr(_sys, "_sy_log_epoch", 0) + 1
+
+
+def _log_epoch() -> int:
+    import sys as _sys
+    return getattr(_sys, "_sy_log_epoch", 0)
+
+
 def get_sent_log() -> Dict[str, Any]:
-    if "sent_log_data" not in st.session_state:
+    if "sent_log_data" not in st.session_state or st.session_state.get("sent_log_data_epoch") != _log_epoch():
         st.session_state["sent_log_data"] = SENT_LOG.load()
+        st.session_state["sent_log_data_epoch"] = _log_epoch()
     return st.session_state["sent_log_data"]
 
 
@@ -1913,39 +1930,52 @@ def push_to_zoho(ids: List[str], default_from_idx: int, origin: str = "panel") -
     who = get_sender().get("name") or "Customer Growth"
     stamp = now_uk().strftime("%d %b %Y %H:%M")
     progress = st.progress(0.0, text="Talking to Zoho…")
-    for n, aid in enumerate(ids, start=1):
-        item = queue.get(aid)
-        if not item:
-            continue
-        name = item["acct"].get("Account_Name", "customer")
-        progress.progress(n / len(ids), text=f"Sending {n} of {len(ids)} · {name}")
-        ensure_draft(item)
-        c, to = current_contact(item), item_email(item)
-        if not to or not c.get("id"):
-            problems.append(f"{name}: no contact email (or the contact opted out)")
-            continue
-        if not item["offers"]:
-            problems.append(f"{name}: no ideas picked, so nothing to send")
-            continue
-        sender = pick_from(senders, item["brand"], default_from_idx)
-        if not sender:
-            problems.append(f"{name}: no From address available in Zoho")
-            continue
-        try:
-            ZOHO.send_mail("Contacts", str(c["id"]), sender, to, contact_name(c), item["subject"],
-                           email_html(item["body"], item["subject"], item["brand"]))
-        except ZohoError as exc:
-            problems.append(f"{name}: not sent. {exc}")
-            continue
-        note = (f"Emailed {contact_name(c) or to} ({to}) via Customer Growth on {stamp}, by {who}.\n"
-                f"Brand: {item['brand']['name']} (from {sender.get('email')})\nSubject: {item['subject']}\n"
-                f"Ideas: {', '.join(OFFER_TITLES.get(o, o) for o in item['offers'])}")
-        try:
-            ZOHO.add_note("Accounts", aid, "Customer Growth: email sent", note)
-        except ZohoError as exc:
-            problems.append(f"{name}: sent, but the note wasn't added. {exc}")
-        changes[aid] = dict(sent_record(item, via="zoho"), from_address=sender.get("email", ""))
-        done.append(name)
+    try:
+        for n, aid in enumerate(ids, start=1):
+            item = queue.get(aid)
+            if not item:
+                continue
+            name = item["acct"].get("Account_Name", "customer")
+            progress.progress(n / len(ids), text=f"Sending {n} of {len(ids)} · {name}")
+            ensure_draft(item)
+            c, to = current_contact(item), item_email(item)
+            if not to or not c.get("id"):
+                problems.append(f"{name}: no contact email (or the contact opted out)")
+                continue
+            if not item["offers"]:
+                problems.append(f"{name}: no ideas picked, so nothing to send")
+                continue
+            sender = pick_from(senders, item["brand"], default_from_idx)
+            if not sender:
+                problems.append(f"{name}: no From address available in Zoho")
+                continue
+            try:
+                ZOHO.send_mail("Contacts", str(c["id"]), sender, to, contact_name(c), item["subject"],
+                               email_html(item["body"], item["subject"], item["brand"]))
+            except ZohoError as exc:
+                problems.append(f"{name}: not sent. {exc}")
+                continue
+            note = (f"Emailed {contact_name(c) or to} ({to}) via Customer Growth on {stamp}, by {who}.\n"
+                    f"Brand: {item['brand']['name']} (from {sender.get('email')})\nSubject: {item['subject']}\n"
+                    f"Ideas: {', '.join(OFFER_TITLES.get(o, o) for o in item['offers'])}")
+            try:
+                ZOHO.add_note("Accounts", aid, "Customer Growth: email sent", note)
+            except ZohoError as exc:
+                problems.append(f"{name}: sent, but the note wasn't added. {exc}")
+            changes[aid] = dict(sent_record(item, via="zoho"), from_address=sender.get("email", ""))
+            if len(changes) >= 5:  # Save as we go, so nothing is lost if the page is interrupted
+                record_sent(dict(changes))
+                changes.clear()
+            done.append(name)
+    finally:
+        # Save whatever was sent even if the run is cut short (e.g. switching page mid-send)
+        if changes:
+            try:
+                record_sent(dict(changes))
+            except BaseException:  # Page stopping: save without touching the page, then let it stop
+                save_log_quietly(SENT_LOG, dict(changes), "Customer Growth: sends saved after the page was interrupted")
+                raise
+            changes.clear()
     progress.empty()
     if changes:
         record_sent(changes)
@@ -1969,8 +1999,9 @@ CAMPAIGN_GAP_DAYS = 14  # No one-to-one upsell within this many days of a campai
 
 
 def get_camp_log() -> Dict[str, Any]:
-    if "camp_log_data" not in st.session_state:
+    if "camp_log_data" not in st.session_state or st.session_state.get("camp_log_data_epoch") != _log_epoch():
         st.session_state["camp_log_data"] = CAMP_LOG.load()
+        st.session_state["camp_log_data_epoch"] = _log_epoch()
     return st.session_state["camp_log_data"]
 
 
@@ -2054,33 +2085,46 @@ def send_campaign(camp: Dict[str, Any], rows: List[Dict[str, Any]], overrides: D
     done, problems = [], []
     changes: Dict[str, Dict[str, Any]] = {}
     progress = st.progress(0.0, text="Sending the campaign through Zoho…")
-    for n, r in enumerate(rows, start=1):
-        a, c = r["acct"], r["contact"]
-        brand, _ = brand_for(a.get("_type") or "")
-        name = a.get("Account_Name", "customer")
-        progress.progress(n / len(rows), text=f"Sending {n} of {len(rows)} · {name}")
-        subject, body = build_campaign_email(camp, overrides, a, c, brand, a["_snap"]["profile"])
-        sender = pick_from(senders, brand, default_from_idx)
-        if not sender:
-            problems.append(f"{name}: no From address available in Zoho")
-            continue
-        try:
-            ZOHO.send_mail("Contacts", str(c["id"]), sender, c["Email"], contact_name(c), subject,
-                           email_html(body, subject, brand, cta_label=camp["cta"]))
-        except ZohoError as exc:
-            problems.append(f"{name}: not sent. {exc}")
-            continue
-        try:
-            ZOHO.add_note("Accounts", a["id"], f"Campaign sent: {camp['focus']}",
-                          f"Month {camp['month']} campaign \"{camp['focus']}\" emailed to {contact_name(c) or c['Email']}"
-                          f" ({c['Email']}) on {stamp}, by {who}.\nBrand: {brand['name']} (from {sender.get('email')})"
-                          f"\nSubject: {subject}")
-        except ZohoError as exc:
-            problems.append(f"{name}: sent, but the note wasn't added. {exc}")
-        changes[r["key"]] = {"campaign": camp["id"], "account_id": a["id"], "account": name,
-                             "contact": contact_name(c), "to": c["Email"], "brand": brand["name"],
-                             "subject": subject, "sent_at": now_uk().isoformat(timespec="seconds"), "sent_by": who}
-        done.append(name)
+    try:
+        for n, r in enumerate(rows, start=1):
+            a, c = r["acct"], r["contact"]
+            brand, _ = brand_for(a.get("_type") or "")
+            name = a.get("Account_Name", "customer")
+            progress.progress(n / len(rows), text=f"Sending {n} of {len(rows)} · {name}")
+            subject, body = build_campaign_email(camp, overrides, a, c, brand, a["_snap"]["profile"])
+            sender = pick_from(senders, brand, default_from_idx)
+            if not sender:
+                problems.append(f"{name}: no From address available in Zoho")
+                continue
+            try:
+                ZOHO.send_mail("Contacts", str(c["id"]), sender, c["Email"], contact_name(c), subject,
+                               email_html(body, subject, brand, cta_label=camp["cta"]))
+            except ZohoError as exc:
+                problems.append(f"{name}: not sent. {exc}")
+                continue
+            try:
+                ZOHO.add_note("Accounts", a["id"], f"Campaign sent: {camp['focus']}",
+                              f"Month {camp['month']} campaign \"{camp['focus']}\" emailed to {contact_name(c) or c['Email']}"
+                              f" ({c['Email']}) on {stamp}, by {who}.\nBrand: {brand['name']} (from {sender.get('email')})"
+                              f"\nSubject: {subject}")
+            except ZohoError as exc:
+                problems.append(f"{name}: sent, but the note wasn't added. {exc}")
+            changes[r["key"]] = {"campaign": camp["id"], "account_id": a["id"], "account": name,
+                                 "contact": contact_name(c), "to": c["Email"], "brand": brand["name"],
+                                 "subject": subject, "sent_at": now_uk().isoformat(timespec="seconds"), "sent_by": who}
+            if len(changes) >= 5:  # Save as we go, so nothing is lost if the page is interrupted
+                record_campaign(dict(changes))
+                changes.clear()
+            done.append(name)
+    finally:
+        # Save whatever was sent even if the run is cut short (e.g. switching page mid-send)
+        if changes:
+            try:
+                record_campaign(dict(changes))
+            except BaseException:  # Page stopping: save without touching the page, then let it stop
+                save_log_quietly(CAMP_LOG, dict(changes), "Customer Growth: campaign sends saved after the page was interrupted")
+                raise
+            changes.clear()
     progress.empty()
     if changes:
         record_campaign(changes)
