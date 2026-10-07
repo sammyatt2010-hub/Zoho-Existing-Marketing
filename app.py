@@ -1593,9 +1593,40 @@ EXCLUDE_TAGS_DEFAULT = "dead, do not contact"
 
 
 def exclude_tag_words() -> List[str]:
+    """Older word-based setting ('dead, do not contact'). Only used until exact tags are picked from the list."""
     raw = get_settings().get("exclude_tags")
     raw = EXCLUDE_TAGS_DEFAULT if raw is None else raw
     return [w.strip().lower() for w in str(raw).split(",") if w.strip()]
+
+
+def known_tags() -> List[str]:
+    """Every tag name seen on Accounts/Contacts in Zoho (remembered for everyone, refreshed on each load)."""
+    names = set(get_settings().get("known_tags") or []) | set(st.session_state.get("seen_tags") or [])
+    return sorted(names, key=str.lower)
+
+
+def excluded_tag_names() -> List[str]:
+    """The exact tags picked in the dropdown. Until someone picks, every known tag matching the old words."""
+    picked = get_settings().get("exclude_tag_names")
+    if isinstance(picked, list):
+        return picked
+    words = exclude_tag_words()
+    return [t for t in known_tags() if any(w in t.lower() for w in words)]
+
+
+def tag_is_excluded(tag: str) -> bool:
+    picked = get_settings().get("exclude_tag_names")
+    if isinstance(picked, list):
+        return tag.strip().lower() in {p.strip().lower() for p in picked}
+    return any(w in tag.lower() for w in exclude_tag_words())
+
+
+def remember_tags(seen: Set[str]) -> None:
+    """Adds newly seen tag names to the shared list behind the dropdown."""
+    st.session_state["seen_tags"] = sorted(set(st.session_state.get("seen_tags") or []) | seen)
+    stored = set(get_settings().get("known_tags") or [])
+    if not seen <= stored:
+        save_settings("known_tags", sorted(stored | seen, key=str.lower))
 
 
 def _tag_names(rec: Dict[str, Any]) -> List[str]:
@@ -1603,21 +1634,23 @@ def _tag_names(rec: Dict[str, Any]) -> List[str]:
     return [str(t.get("name") if isinstance(t, dict) else t) for t in tags if t]
 
 
-def tagged_out(module: str, words: List[str]) -> Tuple[Dict[str, List[str]], Optional[str]]:
-    """{record id: matching tag names} for records whose tags contain any of the words (e.g. 'DEAD ACCOUNT').
-    Read with the Get Records API, which always returns tags. Returns (matches, error)."""
-    if not words:
-        return {}, None
+def tagged_out(module: str, words: Optional[List[str]] = None) -> Tuple[Dict[str, List[str]], Optional[str]]:
+    """{record id: matching tag names} for records carrying an excluded tag (e.g. 'DEAD ACCOUNT').
+    Read with the Get Records API, which always returns tags. Also collects every tag name for the dropdown."""
     name_field = "Account_Name" if module == "Accounts" else "Last_Name"
     try:
         recs = ZOHO.get_records(module, [name_field, "Tag"])
     except ZohoError as exc:
         return {}, str(exc)
     out: Dict[str, List[str]] = {}
+    seen: Set[str] = set()
     for rid, r in recs.items():
-        hits = [t for t in _tag_names(r) if any(w in t.lower() for w in words)]
+        names = _tag_names(r)
+        seen.update(names)
+        hits = [t for t in names if tag_is_excluded(t)]
         if hits:
             out[str(rid)] = hits
+    remember_tags(seen)
     return out, None
 
 
@@ -1642,8 +1675,7 @@ def load_accounts(types: List[str], afields: Dict[str, Dict[str, Any]], fmap: Di
         vals = [aliases.get(value_text(v), value_text(v)) for v in (a.get(tf) if isinstance(a.get(tf), list) else [a.get(tf)])]
         a["_type"] = next((v for v in vals if v in types), vals[0] if vals else "")
     # Leave out accounts tagged e.g. DEAD ACCOUNT / DEAD CUSTOMER / DO NOT CONTACT
-    words = exclude_tag_words()
-    dead, err = tagged_out("Accounts", words)
+    dead, err = tagged_out("Accounts")
     st.session_state["tag_check_error"] = err
     st.session_state["excluded_tagged"] = [
         {"Customer": a.get("Account_Name", ""), "Type": a.get("_type", ""), "Tag": ", ".join(dead[str(a.get("id"))])}
@@ -1659,7 +1691,7 @@ def load_contacts() -> List[Dict[str, Any]]:
         recs = ZOHO.get_records("Contacts", CONTACT_FIELDS)
         out = [r for r in recs.values() if (r.get("Email") or "").strip()]
     # Contacts tagged dead / do not contact are left out too
-    dead, err = tagged_out("Contacts", exclude_tag_words())
+    dead, err = tagged_out("Contacts")
     if err:
         st.session_state["tag_check_error"] = st.session_state.get("tag_check_error") or err
     st.session_state["excluded_contacts"] = sum(1 for c in out if str(c.get("id")) in dead)
@@ -2748,10 +2780,10 @@ with col_left:
             if accts_all and (_excl or _excl_c):
                 with st.expander(f"🚫  Left out: {len(_excl)} tagged account{'s' if len(_excl) != 1 else ''}"
                                  + (f" and {_excl_c} tagged contact{'s' if _excl_c != 1 else ''}" if _excl_c else "")
-                                 + " (" + ", ".join(w.upper() for w in exclude_tag_words()) + ")"):
+                                 + " (" + ", ".join(excluded_tag_names()) + ")"):
                     if _excl:
                         _dataframe(pd.DataFrame(_excl), hide_index=True)
-                    st.caption("These never appear in upsell lists or campaigns. Change the words under 🚫 Excluded tags.")
+                    st.caption("These never appear in upsell lists or campaigns. Change the list under 🚫 Excluded tags.")
             if accts_all:
                 cba = st.session_state.get("contacts_by_acct", {})
                 with_email = sum(1 for a in accts_all if any(not c.get("Email_Opt_Out") for c in cba.get(a["id"], [])))
@@ -2764,21 +2796,33 @@ with col_left:
                     "</div>")
 
             # ---- Excluded tags (shared) ----
-            with st.expander("🚫  Excluded tags  ·  " + (", ".join(exclude_tag_words()) or "none"), expanded=False):
-                st.caption("Accounts or contacts with a Zoho tag containing any of these words are never loaded,"
-                           " e.g. 'dead' catches DEAD ACCOUNT and DEAD CUSTOMER. Separate words with commas.")
+            _ex_now = excluded_tag_names()
+            with st.expander(f"🚫  Excluded tags  ·  {len(_ex_now)} selected" if _ex_now else "🚫  Excluded tags  ·  none",
+                             expanded=False):
+                _all_tags = known_tags()
+                if not _all_tags:
+                    st.caption("The list fills from Zoho the first time you click Load customers. Until then,"
+                               " anything tagged with 'dead' or 'do not contact' is left out.")
+                else:
+                    st.caption("Accounts or contacts carrying any of these Zoho tags are never loaded. Pick from the"
+                               " tags in your Zoho; the list updates each time you load customers. Saved for everyone.")
                 ex1, ex2 = columns([2.2, 1])
                 with ex1:
-                    new_words = st.text_input("Leave out tags containing", value=", ".join(exclude_tag_words()),
-                                              key="excl_tags_in")
+                    _opts = sorted(set(_all_tags) | set(_ex_now), key=str.lower)
+                    new_tags = st.multiselect("Leave out anything tagged", _opts, default=_ex_now, key="excl_tags_pick",
+                                              placeholder="Pick tags to exclude")
                 with ex2:
-                    if st.button("Save", key="excl_tags_save", **FULL_WIDTH,
-                                 disabled=new_words.strip().lower() == ", ".join(exclude_tag_words())):
-                        err = save_settings("exclude_tags", new_words.strip())
+                    _changed = sorted(t.lower() for t in new_tags) != sorted(t.lower() for t in _ex_now) \
+                        or not isinstance(get_settings().get("exclude_tag_names"), list)
+                    if st.button("Save", key="excl_tags_save", **FULL_WIDTH, disabled=not _changed or not _opts):
+                        err = save_settings("exclude_tag_names", list(new_tags))
                         st.session_state.pop("accts", None)
+                        st.session_state.pop("excl_tags_pick", None)
                         if err:
                             st.warning(f"Saved for this session only: {err}")
                         st.rerun()
+                if _ex_now:
+                    st.caption("Now excluding: " + ", ".join(_ex_now) + ". Click Load customers again after saving.")
 
             # ---- Field mapping (once, shared) ----
             with st.expander("⚙️  Zoho field mapping" + ("" if fmap_saved else "  ·  using SY Comms defaults"), expanded=False):
