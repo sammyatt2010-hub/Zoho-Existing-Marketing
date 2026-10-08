@@ -1614,7 +1614,12 @@ def excluded_tag_names() -> List[str]:
     return [t for t in known_tags() if any(w in t.lower() for w in words)]
 
 
+ALWAYS_EXCLUDED_TAG_WORDS = ("not interested",)  # Built in for every app: never contact these
+
+
 def tag_is_excluded(tag: str) -> bool:
+    if any(w in tag.lower() for w in ALWAYS_EXCLUDED_TAG_WORDS):
+        return True
     picked = get_settings().get("exclude_tag_names")
     if isinstance(picked, list):
         return tag.strip().lower() in {p.strip().lower() for p in picked}
@@ -2803,7 +2808,8 @@ with col_left:
             if accts_all and (_excl or _excl_c):
                 with st.expander(f"🚫  Left out: {len(_excl)} tagged account{'s' if len(_excl) != 1 else ''}"
                                  + (f" and {_excl_c} tagged contact{'s' if _excl_c != 1 else ''}" if _excl_c else "")
-                                 + " (" + ", ".join(excluded_tag_names()) + ")"):
+                                 + " (" + ", ".join(sorted({t for r in _excl for t in str(r.get("Tag", "")).split(", ") if t})
+                                                     or excluded_tag_names()) + ")"):
                     if _excl:
                         _dataframe(pd.DataFrame(_excl), hide_index=True)
                     st.caption("These never appear in upsell lists or campaigns. Change the list under 🚫 Excluded tags.")
@@ -2827,7 +2833,8 @@ with col_left:
                                " 'dead' or 'do not contact' is left out.")
                 else:
                     st.caption("Accounts or contacts carrying any of these Zoho tags are never loaded. Pick from the"
-                               " tags in your Zoho; the list updates each time you load customers. Saved for everyone.")
+                               " tags in your Zoho; the list updates each time you load customers. Saved for everyone."
+                               " Anything tagged Not Interested is always left out, whatever is picked here.")
                 ex1, ex2 = columns([2.2, 1])
                 with ex1:
                     _opts = sorted(set(_all_tags) | set(_ex_now), key=str.lower)
