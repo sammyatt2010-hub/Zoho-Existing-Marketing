@@ -3079,6 +3079,15 @@ with col_left:
             else:
                 ready = True
 
+        if ready:  # Always-available key helper; opens by itself when the key is missing a permission
+            need_key = bool(st.session_state.get("cg_need_key"))
+            if need_key:
+                st.error("This app's Zoho key doesn't have the permissions Customer Growth needs (usually another app's"
+                         " key was pasted into this app's Secrets). Make a new key in the box below, put it in this"
+                         " app's Secrets as ZOHO_REFRESH_TOKEN, save and reboot.")
+            with st.expander("🔑  Zoho key (make a new one)", expanded=need_key):
+                render_zoho_setup()
+
         if ready:
             afields = st.session_state["acct_fields"]
             tf = detect_type_field(afields)
@@ -3133,11 +3142,8 @@ with col_left:
                 if load_err and not accts:
                     st.error(load_err)
                     if "permission" in load_err.lower():
-                        st.info("This app's Zoho key doesn't have the permissions Customer Growth needs. This usually"
-                                " means another app's key was pasted into this app's Secrets. Each app needs its own key:"
-                                " make one below with this app's scope, then replace ZOHO_REFRESH_TOKEN in this app's"
-                                " Secrets and reboot.")
-                        render_zoho_setup()
+                        st.session_state["cg_need_key"] = True
+                        st.rerun()
                 else:
                     if load_err:
                         st.warning(load_err)
