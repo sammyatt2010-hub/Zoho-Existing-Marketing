@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import hmac
 import html as html_lib
 import io
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import formatdate
-from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import pandas as pd
 import requests
@@ -1233,6 +1234,7 @@ def _email_plain_html(body: str) -> str:
             out.append(f'<ul style="margin:0 0 14px 0;padding-left:20px">{items}</ul>')
         else:
             text = "<br>".join(html_lib.escape(l) for l in block.split("\n"))
+            text = re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', text)
             style = "margin:0 0 14px 0" + (";color:#6b7280;font-size:12px" if block.startswith("P.S.") else "")
             out.append(f'<p style="{style}">{text}</p>')
     return ('<html><body style="font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.45;color:#1f2937">'
@@ -1296,6 +1298,16 @@ def _email_branded_html(body: str, subject: str, brand: Dict[str, Any], cta_labe
                 f'<tr><td style="padding:0 36px 18px 36px;{font};font-size:14px">'
                 f'<a href="{e(m.group(2))}" style="color:{teal};font-weight:700;text-decoration:none">'
                 f'&#9654;&nbsp; {e(m.group(1))} &rarr;</a></td></tr>')
+            continue
+        m2 = re.match(r"^([^:\n]{3,60}):\s*(https?://\S+)$", first)
+        if m2:
+            rows.append(
+                f'<tr><td align="center" style="padding:6px 36px 18px 36px">'
+                f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+                f'<td align="center" bgcolor="{teal}" style="border-radius:8px">'
+                f'<a href="{e(m2.group(2))}" style="display:inline-block;padding:13px 30px;{font};font-size:15px;'
+                f'font-weight:700;color:#ffffff;text-decoration:none;border-radius:8px">{e(m2.group(1))} &rarr;</a>'
+                f'</td></tr></table></td></tr>')
             continue
         if low.startswith("just reply") and cta_label:
             href = f"mailto:{brand.get('email', '')}?subject={quote(cta_label)}"
@@ -1492,7 +1504,63 @@ CAMPAIGNS: List[Dict[str, Any]] = [
              "- What could be better: simpler bills, better tools and fewer suppliers.\n\nYou'll leave with a clear"
              " plan for next year, with no obligation to change anything.\n\n" + CTA_LINE},
 ]
-CAMPAIGN_BY_ID = {c["id"]: c for c in CAMPAIGNS}
+# ---- Christmas opening hours: a service email (not marketing) with a link to the festive form ----
+XMAS_CAMPAIGN: Dict[str, Any] = {
+    "id": "x01", "month": 12, "label": "🎄 Christmas opening hours", "focus": "Christmas opening hours",
+    "operational": True, "skip": None, "cta": "Tell us your Christmas hours",
+    "subject": "Your Christmas opening hours: let us know by {deadline}",
+    "body": "Hi {first},\n\nChristmas is nearly here, and it's our busiest time for setting phone systems up for the"
+            " holidays. So that {company}'s phones do exactly what you want while you're closed, could you take two"
+            " minutes to tell us:\n\n"
+            "- Your Christmas hours: the days you're closed, closing early or opening late.\n"
+            "- While you're closed: a festive message, voicemail sent to your email, or a divert to a mobile.\n"
+            "- Your message: use our ready-made festive greeting, or give us your own words.\n\n"
+            "Tell us your Christmas hours: {form_link}\n\n"
+            "If we hear from you by {deadline}, we'll have everything set up before you break up and confirm once"
+            " it's live.\n\nIf your phones should work exactly as normal over Christmas, there's nothing you need to do.",
+}
+XMAS_REMINDER: Dict[str, Any] = dict(
+    XMAS_CAMPAIGN, id="x01r", label="🎄 Christmas hours reminder", focus="Christmas hours reminder",
+    subject="Reminder: your Christmas opening hours",
+    body="Hi {first},\n\nA quick reminder: we haven't had {company}'s Christmas opening hours yet. It only takes two"
+         " minutes, and it means your phones will say exactly what you want while you're closed.\n\n"
+         "Tell us your Christmas hours: {form_link}\n\n"
+         "If we hear from you by {deadline}, we'll have it all set up in time.\n\nIf your phones should work exactly"
+         " as normal over Christmas, there's nothing you need to do.")
+CAMPAIGN_BY_ID = {c["id"]: c for c in CAMPAIGNS + [XMAS_CAMPAIGN, XMAS_REMINDER]}
+
+
+def camp_title(camp: Dict[str, Any]) -> str:
+    return camp.get("label") or f"Month {camp['month']}: {camp['focus']}"
+
+
+def xmas_deadline() -> str:
+    """XMAS_DEADLINE in Secrets (e.g. 'Friday 11 December'), else the Friday about two weeks before Christmas."""
+    if _secret_value("XMAS_DEADLINE"):
+        return _secret_value("XMAS_DEADLINE")
+    today = now_uk().date()
+    y = today.year if today.month >= 6 else today.year - 1
+    d = datetime(y, 12, 14).date()
+    while d.weekday() != 4:
+        d -= timedelta(days=1)
+    return d.strftime("%A %d %B").replace(" 0", " ")
+
+
+def xmas_link(acct: Dict[str, Any], contact: Dict[str, Any], brand: Dict[str, Any]) -> str:
+    """Personal, signed link to the Christmas hours form (in the quote survey app), in the customer's brand."""
+    base, key = _secret_value("SURVEY_FORM_URL").strip(), _secret_value("SURVEY_SIGNING_KEY")
+    if not (base and key):
+        return ""
+    aid, cid = str(acct.get("id") or ""), str(contact.get("id") or "")
+    email = (contact.get("Email") or "").strip()
+    q = {"form": "xmas", "aid": aid, "cid": cid, "c": (acct.get("Account_Name") or "").strip(),
+         "n": contact_name(contact), "e": email, "b": brand.get("name") or "", "w1": brand.get("word1") or "",
+         "w2": brand.get("word2") or "", "pc": brand.get("primary") or "", "ac": brand.get("accent") or "",
+         "bp": brand.get("phone") or "", "be": brand.get("email") or "", "bw": brand.get("website") or ""}
+    q = {k: v for k, v in q.items() if v}
+    msg = f"xmas|{aid}|{cid}|{email.lower()}|{brand.get('name') or ''}".encode()
+    q["s"] = hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()[:20]
+    return base + ("&" if "?" in base else "?") + urlencode(q)
 
 
 class _SafeDict(dict):
@@ -1526,6 +1594,8 @@ def build_campaign_email(camp: Dict[str, Any], overrides: Dict[str, Any], acct: 
         crms=", ".join(crms[:2]) + f" and {crms[2]}" if len(crms) >= 3 else " and ".join(crms),
         or_call=f", or call us on {brand['phone']}" if brand.get("phone") else "",
         callscope_url=_secret_value("CALLSCOPE_URL", CALLSCOPE_URL_DEFAULT),
+        deadline=xmas_deadline() if camp.get("operational") else "",
+        form_link=xmas_link(acct, contact, brand) if camp.get("operational") else "",
     )
     subject = subj_t.format_map(vals)
     sender = get_sender()
@@ -1538,8 +1608,9 @@ def build_campaign_email(camp: Dict[str, Any], overrides: Dict[str, Any], acct: 
         sig.append(line)
     if brand.get("website"):
         sig.append(brand["website"])
-    body = (body_t.format_map(vals) + "\n\n" + "\n".join(sig)
-            + "\n\nP.S. If you'd rather not get emails like this, just reply \"no thanks\" and we'll take you off the list.")
+    body = body_t.format_map(vals) + "\n\n" + "\n".join(sig)
+    if not camp.get("operational"):  # Service emails (e.g. Christmas hours) aren't marketing, so no opt-out line
+        body += "\n\nP.S. If you'd rather not get emails like this, just reply \"no thanks\" and we'll take you off the list."
     return subject, body
 
 
@@ -2085,7 +2156,7 @@ def last_campaign_contact(aid: str, exclude: str = "") -> Optional[datetime]:
     """When this account last got any campaign email (other than campaign `exclude`)."""
     best = None
     for r in get_camp_log().values():
-        if r.get("account_id") != aid or r.get("campaign") == exclude:
+        if r.get("account_id") != aid or r.get("campaign") == exclude or str(r.get("campaign", "")).startswith("x"):
             continue
         try:
             t = datetime.fromisoformat(r["sent_at"])
@@ -2114,6 +2185,8 @@ def campaign_audience(camp: Dict[str, Any], accts: List[Dict[str, Any]], all_con
             reason = None
             if not contacts:
                 reason = "No contact email (or opted out)"
+            elif camp.get("operational"):
+                reason = None
             elif skip_has and campaign_has_it(camp, snap):
                 reason = "Already has it"
             elif min_in is not None and snap["months_in"] is not None and snap["months_in"] < min_in:
@@ -2164,12 +2237,12 @@ def send_campaign(camp: Dict[str, Any], rows: List[Dict[str, Any]], overrides: D
                 continue
             try:
                 ZOHO.add_note("Accounts", a["id"], f"Campaign sent: {camp['focus']}",
-                              f"Month {camp['month']} campaign \"{camp['focus']}\" emailed to {contact_name(c) or c['Email']}"
+                              f"{camp_title(camp)} emailed to {contact_name(c) or c['Email']}"
                               f" ({c['Email']}) on {stamp}, by {who}.\nBrand: {brand['name']} (from {sender.get('email')})"
                               f"\nSubject: {subject}")
             except ZohoError as exc:
                 problems.append(f"{name}: sent, but the note wasn't added. {exc}")
-            changes[r["key"]] = {"campaign": camp["id"], "account_id": a["id"], "account": name,
+            changes[r["key"]] = {"campaign": camp["id"], "account_id": a["id"], "account": name, "contact_id": str(c["id"]),
                                  "contact": contact_name(c), "to": c["Email"], "brand": brand["name"],
                                  "subject": subject, "sent_at": now_uk().isoformat(timespec="seconds"), "sent_by": who}
             if len(changes) >= 5:  # Save as we go, so nothing is lost if the page is interrupted
@@ -2191,24 +2264,37 @@ def send_campaign(camp: Dict[str, Any], rows: List[Dict[str, Any]], overrides: D
     st.session_state["camp_result"] = {"done": done, "problems": problems}
 
 
-def render_campaigns() -> None:
+def render_campaigns(only: Optional[str] = None) -> None:
     accts_all = st.session_state.get("accts") or []
     overrides = get_settings().get("campaign_copy") or {}
     log = get_camp_log()
     with st.container(key="card-select"):
-        section_header("02", "Monthly campaign", "Pick the campaign, check who it's going to, then send in batches.")
+        if only:
+            section_header("02", "Christmas hours email", "Send each customer their personal Christmas hours form, in"
+                           " their own brand. Replies land in the tracker below.")
+        else:
+            section_header("02", "Monthly campaign", "Pick the campaign, check who it's going to, then send in batches.")
         if not accts_all:
             st.caption("Load your customers above first.")
             return
         sent_per = {c["id"]: sum(1 for k in log if k.startswith(c["id"] + "|")) for c in CAMPAIGNS}
         ids = [c["id"] for c in CAMPAIGNS]
-        cid = st.selectbox("Campaign", ids, key="camp_pick",
-                           format_func=lambda i: f"Month {CAMPAIGN_BY_ID[i]['month']} · {CAMPAIGN_BY_ID[i]['focus']}"
-                                                 + (f"   ({sent_per[i]} sent)" if sent_per[i] else ""))
+        if only:
+            cid = only
+            if not (_secret_value("SURVEY_FORM_URL") and _secret_value("SURVEY_SIGNING_KEY")):
+                st.error("Add SURVEY_FORM_URL (the survey app's address) and SURVEY_SIGNING_KEY (the same phrase as the"
+                         " survey app) to this app's Secrets, above any [ ] heading, then reboot. The email's form link"
+                         " needs both.")
+                return
+        else:
+            cid = st.selectbox("Campaign", ids, key="camp_pick",
+                               format_func=lambda i: f"Month {CAMPAIGN_BY_ID[i]['month']} · {CAMPAIGN_BY_ID[i]['focus']}"
+                                                     + (f"   ({sent_per[i]} sent)" if sent_per[i] else ""))
         camp = CAMPAIGN_BY_ID[cid]
         subj_t, _ = campaign_copy(camp, overrides)
         render_html(f'<div class="pe-panel"><div class="h">Subject</div><div style="font-weight:700">{esc(subj_t)}</div>'
-                    f'<div class="h" style="margin-top:10px">Button</div><div>{esc(camp["cta"])} → (opens a reply)</div></div>')
+                    f'<div class="h" style="margin-top:10px">Button</div><div>{esc(camp["cta"])} → '
+                    f'{"(opens their personal Christmas hours form)" if camp.get("operational") else "(opens a reply)"}</div></div>')
 
         type_counts: Dict[str, int] = {}
         for a in accts_all:
@@ -2220,17 +2306,20 @@ def render_campaigns() -> None:
         with c2:
             who_to = st.selectbox("Send to", ["Main contact per customer", "Every contact with an email"], key="camp_who",
                                   help="Main contact = owner / director / partner first, then managers.")
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            skip_has = st.toggle("Skip if they already have it", value=bool(camp.get("skip")), disabled=not camp.get("skip"),
-                                 key=f"camp_skip_{cid}", help="e.g. existing Call Scope customers don't get the Call Scope month.")
-        with d2:
-            f_min = st.selectbox("Customer for at least", ["Any", "3 months", "6 months", "1 year"], index=1, key="camp_min")
-        with d3:
-            gap = st.selectbox("Not if emailed in the last", ["7 days", "14 days", "30 days"], index=1, key="camp_gap",
-                               help="Any one-to-one upsell or other campaign email.")
-        min_in = {"Any": None, "3 months": 3, "6 months": 6, "1 year": 12}[f_min]
-        gap_days = int(gap.split()[0])
+        if camp.get("operational"):
+            skip_has, min_in, gap_days = False, None, 0
+        else:
+            d1, d2, d3 = st.columns(3)
+            with d1:
+                skip_has = st.toggle("Skip if they already have it", value=bool(camp.get("skip")), disabled=not camp.get("skip"),
+                                     key=f"camp_skip_{cid}", help="e.g. existing Call Scope customers don't get the Call Scope month.")
+            with d2:
+                f_min = st.selectbox("Customer for at least", ["Any", "3 months", "6 months", "1 year"], index=1, key="camp_min")
+            with d3:
+                gap = st.selectbox("Not if emailed in the last", ["7 days", "14 days", "30 days"], index=1, key="camp_gap",
+                                   help="Any one-to-one upsell or other campaign email.")
+            min_in = {"Any": None, "3 months": 3, "6 months": 6, "1 year": 12}[f_min]
+            gap_days = int(gap.split()[0])
         accts = [a for a in accts_all if (a.get("_type") or "—") in types]
         rows, skipped = campaign_audience(camp, accts, who_to.startswith("Every"), skip_has, min_in, gap_days)
         sent_rows = [r for r in rows if r["sent"]]
@@ -2245,7 +2334,7 @@ def render_campaigns() -> None:
             f'<div class="pe-stat"><div class="v">{len(pending)}</div><div class="l">Left to send</div></div>'
             f'<div class="pe-stat"><div class="v">{total}</div><div class="l">In this campaign</div></div>'
             "</div>")
-        st.progress(pct, text=f"Month {camp['month']}: {camp['focus']} · {len(sent_rows)} of {total} sent · {len(pending)} left")
+        st.progress(pct, text=f"{camp_title(camp)} · {len(sent_rows)} of {total} sent · {len(pending)} left")
 
         res = st.session_state.pop("camp_result", None)
         if res:
@@ -2285,7 +2374,7 @@ def render_campaigns() -> None:
                     except TypeError:
                         pop = st.popover(label, disabled=not chosen or not left_today, **FULL_WIDTH)
                     with pop:
-                        st.markdown(f"Send **Month {camp['month']}: {esc(camp['focus'])}** to the next "
+                        st.markdown(f"Send **{esc(camp_title(camp))}** to the next "
                                     f"**{min(int(n), len(chosen))}** customers, each in their own brand?")
                         st.caption("This can't be undone. Each email is logged on the contact, with a note on the account.")
                         if st.button("Yes, send them now", type="primary", key="camp_go", **FULL_WIDTH):
@@ -2310,21 +2399,22 @@ def render_campaigns() -> None:
             with st.expander(f"Skipped ({len(skipped)})"):
                 _dataframe(pd.DataFrame(skipped), hide_index=True)
 
-        # ---- Everything sent so far, all campaigns ----
-        with st.expander("📊 All campaigns: who has had what"):
-            overview = pd.DataFrame([{"Month": c["month"], "Campaign": c["focus"], "Sent": sent_per[c["id"]],
-                                      "Last sent": fmt_when_iso(max((r.get("sent_at", "") for k, r in log.items()
-                                                                     if k.startswith(c["id"] + "|")), default=""))}
-                                     for c in CAMPAIGNS])
-            _dataframe(overview, hide_index=True)
-            if log:
-                full = pd.DataFrame([{"Campaign": f"Month {CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('month', '?')}: "
-                                                  f"{CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('focus', r.get('campaign'))}",
-                                      "Customer": r.get("account", ""), "Contact": r.get("contact", ""), "Email": r.get("to", ""),
-                                      "Brand": r.get("brand", ""), "Sent": r.get("sent_at", ""), "By": r.get("sent_by", "")}
-                                     for r in log.values()])
-                st.download_button("⬇ Download the full campaign log (.csv)", full.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"Customer_Growth_campaign_log_{now_uk().strftime('%Y-%m-%d')}.csv", mime="text/csv")
+        # ---- Everything sent so far, all campaigns (monthly page only) ----
+        if not only:
+            with st.expander("📊 All campaigns: who has had what"):
+                overview = pd.DataFrame([{"Month": c["month"], "Campaign": c["focus"], "Sent": sent_per[c["id"]],
+                                          "Last sent": fmt_when_iso(max((r.get("sent_at", "") for k, r in log.items()
+                                                                         if k.startswith(c["id"] + "|")), default=""))}
+                                         for c in CAMPAIGNS])
+                _dataframe(overview, hide_index=True)
+                if log:
+                    full = pd.DataFrame([{"Campaign": f"Month {CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('month', '?')}: "
+                                                      f"{CAMPAIGN_BY_ID.get(r.get('campaign'), {}).get('focus', r.get('campaign'))}",
+                                          "Customer": r.get("account", ""), "Contact": r.get("contact", ""), "Email": r.get("to", ""),
+                                          "Brand": r.get("brand", ""), "Sent": r.get("sent_at", ""), "By": r.get("sent_by", "")}
+                                         for r in log.values()])
+                    st.download_button("⬇ Download the full campaign log (.csv)", full.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name=f"Customer_Growth_campaign_log_{now_uk().strftime('%Y-%m-%d')}.csv", mime="text/csv")
 
     # ---- Right: preview + edit copy ----
     with col_right:
@@ -2421,6 +2511,228 @@ def render_late() -> None:
     )
 
 
+# ==========================================
+# 🎄 CHRISTMAS HOURS TRACKER: who's been emailed, who's replied, what to set up, who to chase
+# ==========================================
+XMAS_STORE = SentLog("GITHUB_XMAS_PATH", "xmas_responses.json", ".xmas_responses.json")       # Written by the survey app
+XMAS_SETUP = SentLog("GITHUB_CG_XMAS_SETUP_PATH", "cg_xmas_setup.json", ".cg_xmas_setup.json")  # Engineers' "set up" ticks
+
+
+def xmas_data(force: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if force or "xmas_resp" not in st.session_state:
+        st.session_state["xmas_resp"] = XMAS_STORE.load()
+        st.session_state["xmas_setup"] = XMAS_SETUP.load()
+    return st.session_state["xmas_resp"], st.session_state["xmas_setup"]
+
+
+def _d(iso: str) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return None
+
+
+def xmas_rows() -> List[Dict[str, Any]]:
+    """One row per customer: the Christmas email(s) sent, their reply and whether it's set up."""
+    resp, setup = xmas_data()
+    accts: Dict[str, Dict[str, Any]] = {}
+    for key, r in get_camp_log().items():
+        cid = str(r.get("campaign") or "")
+        if not cid.startswith("x01") or not isinstance(r, dict):
+            continue
+        aid = str(r.get("account_id") or "")
+        row = accts.setdefault(aid, {"aid": aid, "Customer": r.get("account") or "", "Brand": r.get("brand") or "",
+                                     "contacts": {}, "emailed": None, "reminders": 0, "last": None})
+        when = _d(r.get("sent_at"))
+        if cid == "x01r":
+            row["reminders"] += 1
+        elif when and (not row["emailed"] or when < row["emailed"]):
+            row["emailed"] = when
+        if when and (not row["last"] or when > row["last"]):
+            row["last"] = when
+        if r.get("contact_id"):
+            row["contacts"][str(r["contact_id"])] = (r.get("contact") or "", r.get("to") or "")
+        elif "|" in key:
+            row["contacts"][key.split("|")[1]] = (r.get("contact") or "", r.get("to") or "")
+    for key, r in resp.items():
+        if not isinstance(r, dict):
+            continue
+        aid = str(r.get("account_id") or key)
+        row = accts.setdefault(aid, {"aid": aid if str(aid).isdigit() else "", "Customer": r.get("company") or "",
+                                     "Brand": r.get("brand") or "", "contacts": {}, "emailed": None, "reminders": 0,
+                                     "last": None})
+        row["reply"] = r
+    out = []
+    for aid, row in accts.items():
+        r = row.get("reply")
+        done = setup.get(aid) or {}
+        changes = bool(r and r.get("days"))
+        status = ("🛠 Set up" if done.get("done") else
+                  ("✅ Replied" if changes else "👍 No changes") if r else "⏳ Awaiting")
+        ooh = ""
+        if r:
+            ooh = r.get("out_of_hours") or ""
+            if r.get("voicemail_to"):
+                ooh += f" → {r['voicemail_to']}"
+            if r.get("divert_to"):
+                ooh += f" → {r['divert_to']}"
+        first = _d(r.get("first_change")) if r else None
+        out.append({
+            "aid": aid, "Status": status, "Customer": row["Customer"], "Brand": row["Brand"],
+            "Contact": (r or {}).get("contact") or next(iter(row["contacts"].values()), ("", ""))[0],
+            "Email": (r or {}).get("email") or next(iter(row["contacts"].values()), ("", ""))[1],
+            "Phone": (r or {}).get("phone") or "",
+            "Emailed": row["emailed"], "Reminders": row["reminders"],
+            "Replied": _d(r.get("submitted_at")) if r else None,
+            "First change": first, "Christmas hours": (r or {}).get("summary") or "",
+            "While closed": ooh, "Message": (r or {}).get("message") or "",
+            "Recording": (r or {}).get("recording") or "", "Notes": (r or {}).get("notes") or "",
+            "Set up": bool(done.get("done")), "Set up by": done.get("by") or "",
+            "Zoho": ZOHO.record_url("Accounts", aid) if str(aid).isdigit() else "",
+            "_contacts": row["contacts"], "_reply": r, "_last": row["last"],
+        })
+    order = {"✅ Replied": 0, "⏳ Awaiting": 1, "🛠 Set up": 2, "👍 No changes": 3}
+    out.sort(key=lambda x: (order.get(x["Status"], 9), x["First change"] or datetime.max, x["Customer"].lower()))
+    return out
+
+
+def send_xmas_reminders(rows: List[Dict[str, Any]], default_from_idx: int) -> Tuple[int, List[str]]:
+    """Reminder emails to customers who haven't replied. Needs their accounts loaded (section 01)."""
+    by_id = {str(a.get("id")): a for a in (st.session_state.get("accts") or [])}
+    cba = st.session_state.get("contacts_by_acct", {})
+    stamp = now_uk().strftime("%Y%m%d")
+    send_rows, problems = [], []
+    for r in rows:
+        acct = by_id.get(r["aid"])
+        if not acct:
+            problems.append(f"{r['Customer']}: load customers above first (it isn't in the loaded list)")
+            continue
+        contacts = {str(c.get("id")): c for c in cba.get(r["aid"], [])}
+        for cid in (r["_contacts"] or {}):
+            c = contacts.get(cid)
+            if c and c.get("Email") and not c.get("Email_Opt_Out"):
+                send_rows.append({"key": f"x01r|{cid}|{stamp}", "acct": acct, "contact": c, "sent": None})
+    if send_rows:
+        send_campaign(XMAS_REMINDER, send_rows, get_settings().get("campaign_copy") or {}, default_from_idx)
+    return len(send_rows), problems
+
+
+def render_xmas_tracker() -> None:
+    with st.container(key="card-xmas"):
+        section_header("04", "Christmas hours tracker", "Who's been emailed, who's replied, what to set up first, and who"
+                       " to chase. Sorted with the most urgent set-ups at the top.")
+        t1, t2 = columns([1, 3])
+        if t1.button("↻ Check for new replies", key="xm_refresh", **FULL_WIDTH):
+            xmas_data(force=True)
+            st.session_state.pop("camp_log_data", None)
+            st.rerun()
+        if XMAS_STORE.backend != "github":
+            st.warning("Replies are read from the GitHub data repo, and GITHUB_TOKEN / GITHUB_REPO aren't set here.")
+        rows = xmas_rows()
+        if not rows:
+            st.caption("Nothing yet. Send the Christmas hours email above, and replies will appear here.")
+            return
+        n = {k: sum(1 for r in rows if r["Status"] == k) for k in ("✅ Replied", "⏳ Awaiting", "🛠 Set up", "👍 No changes")}
+        emailed = sum(1 for r in rows if r["Emailed"])
+        nxt = next((r for r in rows if r["Status"] == "✅ Replied" and r["First change"]), None)
+        render_html(
+            '<div class="pe-stats" style="margin-top:6px">'
+            f'<div class="pe-stat"><div class="v">{emailed}</div><div class="l">Emailed</div></div>'
+            f'<div class="pe-stat"><div class="v">{n["✅ Replied"] + n["🛠 Set up"] + n["👍 No changes"]}</div><div class="l">Replied</div></div>'
+            f'<div class="pe-stat"><div class="v">{n["✅ Replied"]}</div><div class="l">To set up</div></div>'
+            f'<div class="pe-stat"><div class="v">{n["🛠 Set up"]}</div><div class="l">Set up</div></div>'
+            f'<div class="pe-stat"><div class="v">{n["⏳ Awaiting"]}</div><div class="l">Awaiting</div></div>'
+            "</div>")
+        if nxt:
+            st.info(f"Next to set up: **{nxt['Customer']}**, first change on "
+                    f"**{nxt['First change'].strftime('%a %d %b')}**.")
+        show = st.radio("Show", ["Everyone", "✅ To set up", "⏳ Awaiting", "🛠 Set up", "👍 No changes"], horizontal=True,
+                        key="xm_show", label_visibility="collapsed")
+        view = [r for r in rows if show == "Everyone" or r["Status"] == show.replace("To set up", "Replied")]
+        fmt = lambda d: d.strftime("%d %b") if d else ""  # noqa: E731
+        df = pd.DataFrame([{**{k: v for k, v in r.items() if not k.startswith("_")},
+                            "Emailed": fmt(r["Emailed"]), "Replied": fmt(r["Replied"]),
+                            "First change": r["First change"].strftime("%a %d %b") if r["First change"] else ""}
+                           for r in view])
+        edited = _data_editor(
+            df, hide_index=True, num_rows="fixed", key=f"xm_tbl_{st.session_state.get('xm_ver', 0)}_{show}",
+            height=min(38 + 35 * len(df), 520),
+            column_order=["Set up", "Status", "Customer", "First change", "Christmas hours", "While closed", "Message",
+                          "Recording", "Notes", "Contact", "Email", "Phone", "Brand", "Emailed", "Reminders", "Replied",
+                          "Set up by", "Zoho"],
+            disabled=[c for c in df.columns if c != "Set up"],
+            column_config={
+                "Set up": st.column_config.CheckboxColumn("Set up", width="small",
+                                                          help="Tick once the engineers have set it up on the phone system"),
+                "Christmas hours": st.column_config.TextColumn("Christmas hours", width="large"),
+                "Message": st.column_config.TextColumn("Message", width="medium"),
+                "Zoho": st.column_config.LinkColumn("Zoho", display_text="Open ↗", width="small"),
+                "Reminders": st.column_config.NumberColumn("Reminders", width="small"),
+            })
+        changed = {r["aid"]: bool(v) for r, v in zip(view, list(edited["Set up"])) if bool(v) != r["Set up"]}
+        if changed:
+            if st.button(f"💾  Save {len(changed)} set-up change(s)", type="primary", key="xm_save"):
+                who = get_sender().get("name") or "Customer Growth"
+                upd = {aid: ({"done": True, "by": who, "at": now_uk().isoformat(timespec="seconds")} if v else None)
+                       for aid, v in changed.items()}
+                try:
+                    st.session_state["xmas_setup"] = XMAS_SETUP.apply(upd, f"Christmas hours: {len(upd)} set-up ticks")
+                except Exception as exc:
+                    st.warning(f"Couldn't save to GitHub ({exc.__class__.__name__}); kept for this session only.")
+                    for aid, v in upd.items():
+                        if v:
+                            st.session_state["xmas_setup"][aid] = v
+                        else:
+                            st.session_state["xmas_setup"].pop(aid, None)
+                st.session_state["xm_ver"] = st.session_state.get("xm_ver", 0) + 1
+                st.rerun()
+        full = pd.DataFrame([{**{k: v for k, v in r.items() if not k.startswith("_")},
+                              "Emailed": fmt(r["Emailed"]), "Replied": fmt(r["Replied"]),
+                              "First change": r["First change"].strftime("%Y-%m-%d") if r["First change"] else "",
+                              "Day by day": "; ".join(f"{d['date']}: {d['mode']}"
+                                                      + (f" {d['open']}" if d.get("open") else "")
+                                                      + (f"-{d['close']}" if d.get("close") else "")
+                                                      for d in ((r["_reply"] or {}).get("days") or []))}
+                             for r in rows])
+        st.download_button("⬇  Download the engineers' list (.csv)", full.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"Christmas_hours_{now_uk().strftime('%Y-%m-%d')}.csv", mime="text/csv")
+
+        # ---- Chase the ones who haven't replied ----
+        waiting = [r for r in rows if r["Status"] == "⏳ Awaiting" and r["_contacts"]]
+        if waiting:
+            with st.expander(f"🔔  Send a reminder to customers who haven't replied ({len(waiting)})"):
+                quiet_days = st.selectbox("Only if their last Christmas email was at least", [3, 5, 7, 10], index=1,
+                                          key="xm_quiet", format_func=lambda d: f"{d} days ago")
+                due = [r for r in waiting if r["_last"] and (now_uk() - r["_last"]).days >= quiet_days]
+                st.caption(f"{len(due)} of {len(waiting)} are due a reminder. Each goes to the same contact(s) as the"
+                           " first email, in their own brand, with their personal form link.")
+                if due:
+                    pick = _data_editor(pd.DataFrame([{"Remind": True, "Customer": r["Customer"], "Emailed": fmt(r["Emailed"]),
+                                                       "Reminders": r["Reminders"]} for r in due]),
+                                        hide_index=True, num_rows="fixed", key=f"xm_rem_{st.session_state.get('sent_log_ver', 0)}",
+                                        disabled=["Customer", "Emailed", "Reminders"],
+                                        column_config={"Remind": st.column_config.CheckboxColumn("Remind", width="small")})
+                    chosen = [r for r, v in zip(due, list(pick["Remind"])) if v]
+                    left_today = max(0, ZOHO_SEND_LIMIT - total_sent_today())
+                    if len(chosen) > left_today:
+                        st.warning(f"Zoho allows {ZOHO_SEND_LIMIT} emails a day; {left_today} left today, so only the"
+                                   f" first {left_today} will go.")
+                        chosen = chosen[:left_today]
+                    if not st.session_state.get("accts"):
+                        st.caption("Load your customers in section 01 first, so the reminder can be addressed properly.")
+                    if st.button(f"🔔  Send {len(chosen)} reminder(s)", key="xm_remind", type="primary",
+                                 disabled=not chosen or not st.session_state.get("accts")):
+                        n_sent, probs = send_xmas_reminders(chosen, st.session_state.get("zs_from", 0))
+                        st.session_state["xm_rem_msg"] = (n_sent, probs)
+                        st.rerun()
+        msg = st.session_state.pop("xm_rem_msg", None)
+        if msg:
+            if msg[0]:
+                st.success(f"{msg[0]} reminder email(s) sent.")
+            for p_ in msg[1]:
+                st.warning(p_)
+
+
 # ---------------- Sidebar ----------------
 with st.sidebar:
     render_html(
@@ -2428,8 +2740,9 @@ with st.sidebar:
         f'<div><div class="n">{APP_NAME}</div><div class="s">{APP_TAGLINE}</div></div></div>'
     )
     if "view" not in st.session_state:
-        st.session_state["view"] = st.query_params.get("view") if st.query_params.get("view") in ("campaigns", "activity") else "upsell"
-    _views = {"upsell": "🎯  One-to-one upsell", "campaigns": "📣  Monthly campaigns", "activity": "📊  Activity"}
+        st.session_state["view"] = st.query_params.get("view") if st.query_params.get("view") in ("campaigns", "xmas", "activity") else "upsell"
+    _views = {"upsell": "🎯  One-to-one upsell", "campaigns": "📣  Monthly campaigns", "xmas": "🎄  Christmas hours",
+              "activity": "📊  Activity"}
     if st.session_state["view"] not in _views:
         st.session_state["view"] = "upsell"
     st.session_state["view"] = st.radio(
@@ -2672,6 +2985,7 @@ def build_cg_activity() -> List[Dict[str, Any]]:
                        "Detail": (r.get("subject") or "") + (f" · {offers}" if offers else ""), "By": r.get("sent_by") or "",
                        "How": _act_how(r), "Zoho": ZOHO.record_url("Accounts", key) if str(key).isdigit() else ""})
     names = {c["id"]: f"Campaign {c['id'][1:]}: {c.get('focus', '')}" for c in CAMPAIGNS}
+    names.update({c["id"]: c["label"] for c in (XMAS_CAMPAIGN, XMAS_REMINDER)})
     for key, r in get_camp_log().items():
         if not isinstance(r, dict):
             continue
@@ -2704,6 +3018,7 @@ if st.session_state.get("view") == "activity":
     st.stop()
 
 col_left, col_right = st.columns([1.08, 0.92], gap="large")
+xmas_below = st.container()  # Full-width Christmas tracker, under the two columns
 queue: Dict[str, Dict[str, Any]] = st.session_state["queue"]
 
 # ---------------- Left: load + pick ----------------
@@ -2939,6 +3254,12 @@ with col_left:
 
     if st.session_state.get("view") == "campaigns":
         render_campaigns()
+        render_late()
+        st.stop()
+    if st.session_state.get("view") == "xmas":
+        render_campaigns(only="x01")
+        with xmas_below:
+            render_xmas_tracker()
         render_late()
         st.stop()
 
