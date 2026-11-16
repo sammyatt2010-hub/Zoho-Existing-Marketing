@@ -2607,6 +2607,8 @@ def xmas_rows() -> List[Dict[str, Any]]:
             "While closed": ooh, "Message": (r or {}).get("message") or "",
             "Recording": (r or {}).get("recording") or "", "Notes": (r or {}).get("notes") or "",
             "Set up": bool(done.get("done")), "Set up by": done.get("by") or "",
+            "Ticket": f"#{r['ticket_number']}" if r and r.get("ticket_number") else "",
+            "Ticket link": (r or {}).get("ticket_url") or "",
             "Zoho": ZOHO.record_url("Accounts", aid) if str(aid).isdigit() else "",
             "_contacts": row["contacts"], "_reply": r, "_last": row["last"],
         })
@@ -2676,7 +2678,8 @@ def render_xmas_tracker() -> None:
         edited = _data_editor(
             df, hide_index=True, num_rows="fixed", key=f"xm_tbl_{st.session_state.get('xm_ver', 0)}_{show}",
             height=min(38 + 35 * len(df), 520),
-            column_order=["Set up", "Status", "Customer", "First change", "Christmas hours", "While closed", "Message",
+            column_order=["Set up", "Status", "Customer", "First change", "Ticket", "Ticket link", "Christmas hours",
+                          "While closed", "Message",
                           "Recording", "Notes", "Contact", "Email", "Phone", "Brand", "Emailed", "Reminders", "Replied",
                           "Set up by", "Zoho"],
             disabled=[c for c in df.columns if c != "Set up"],
@@ -2686,6 +2689,7 @@ def render_xmas_tracker() -> None:
                 "Christmas hours": st.column_config.TextColumn("Christmas hours", width="large"),
                 "Message": st.column_config.TextColumn("Message", width="medium"),
                 "Zoho": st.column_config.LinkColumn("Zoho", display_text="Open ↗", width="small"),
+                "Ticket link": st.column_config.LinkColumn("Desk", display_text="Ticket ↗", width="small"),
                 "Reminders": st.column_config.NumberColumn("Reminders", width="small"),
             })
         changed = {r["aid"]: bool(v) for r, v in zip(view, list(edited["Set up"])) if bool(v) != r["Set up"]}
