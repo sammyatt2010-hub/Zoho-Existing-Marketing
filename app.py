@@ -2344,13 +2344,32 @@ def render_campaigns(only: Optional[str] = None) -> None:
                 st.warning(p_)
 
         if pending:
+            # Search + select all / unselect all, e.g. to send a test to just one customer
+            ss = st.session_state
+            q1, q2, q3 = columns([2.2, 1, 1])
+            find = q1.text_input("Search customers", key=f"camp_find_{cid}", placeholder="Customer, contact or email",
+                                 label_visibility="collapsed").strip().lower()
+            if q2.button("☑  Select all", key=f"camp_all_{cid}", **FULL_WIDTH):
+                ss[f"camp_sel_{cid}"] = True
+                ss[f"camp_selv_{cid}"] = ss.get(f"camp_selv_{cid}", 0) + 1
+            if q3.button("☐  Unselect all", key=f"camp_none_{cid}", **FULL_WIDTH):
+                ss[f"camp_sel_{cid}"] = False
+                ss[f"camp_selv_{cid}"] = ss.get(f"camp_selv_{cid}", 0) + 1
+            tick = ss.get(f"camp_sel_{cid}", True)
+            if find:
+                pending = [r for r in pending if find in " ".join(
+                    [r["acct"].get("Account_Name", ""), contact_name(r["contact"]), r["contact"].get("Email", "")]).lower()]
+                if not pending:
+                    st.caption("No customers left to send match that search.")
             pdf = pd.DataFrame([{
-                "key": r["key"], "Send": True, "Customer": r["acct"].get("Account_Name", ""),
+                "key": r["key"], "Send": tick, "Customer": r["acct"].get("Account_Name", ""),
                 "Contact": contact_name(r["contact"]), "Email": r["contact"].get("Email", ""),
                 "Brand": brand_for(r["acct"].get("_type") or "")[0]["name"], "Type": r["acct"].get("_type", ""),
-            } for r in pending])
-            st.caption("Untick anyone you don't want in this campaign. Everyone else goes out in batches until the list is empty.")
-            edited = _data_editor(pdf, hide_index=True, num_rows="fixed", key=f"camp_tbl_{cid}_{st.session_state['sent_log_ver']}",
+            } for r in pending], columns=["key", "Send", "Customer", "Contact", "Email", "Brand", "Type"])
+            st.caption("Tick who to send to (search to find someone, e.g. to test on yourself). Ticked customers go out"
+                       " in batches until the list is empty." + (f" Showing {len(pending)} that match the search." if find else ""))
+            edited = _data_editor(pdf, hide_index=True, num_rows="fixed",
+                                  key=f"camp_tbl_{cid}_{st.session_state['sent_log_ver']}_{ss.get(f'camp_selv_{cid}', 0)}_{find}",
                                   height=min(38 + 35 * len(pdf), 360), column_order=["Send", "Customer", "Contact", "Email", "Brand", "Type"],
                                   disabled=["Customer", "Contact", "Email", "Brand", "Type"],
                                   column_config={"Send": st.column_config.CheckboxColumn("Send", width="small")})
@@ -2365,7 +2384,7 @@ def render_campaigns(only: Optional[str] = None) -> None:
                 with b1:
                     max_n = max(1, min(len(chosen), left_today))
                     n = st.number_input("Send this many now", min_value=1, max_value=max_n, value=min(25, max_n),
-                                        disabled=not chosen or not left_today, key=f"camp_n_{cid}")
+                                        disabled=not chosen or not left_today, key=f"camp_n_{cid}_{len(chosen)}")
                 with b2:
                     label = f"🚀  Send the next {min(int(n), len(chosen))}"
                     try:
