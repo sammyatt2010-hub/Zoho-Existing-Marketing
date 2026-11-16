@@ -3132,6 +3132,12 @@ with col_left:
                                + ". Those services show as 'not recorded'. Pick a different field in the mapping if you can.")
                 if load_err and not accts:
                     st.error(load_err)
+                    if "permission" in load_err.lower():
+                        st.info("This app's Zoho key doesn't have the permissions Customer Growth needs. This usually"
+                                " means another app's key was pasted into this app's Secrets. Each app needs its own key:"
+                                " make one below with this app's scope, then replace ZOHO_REFRESH_TOKEN in this app's"
+                                " Secrets and reboot.")
+                        render_zoho_setup()
                 else:
                     if load_err:
                         st.warning(load_err)
