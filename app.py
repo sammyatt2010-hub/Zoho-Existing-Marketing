@@ -2324,6 +2324,11 @@ def render_campaigns(only: Optional[str] = None) -> None:
         rows, skipped = campaign_audience(camp, accts, who_to.startswith("Every"), skip_has, min_in, gap_days)
         sent_rows = [r for r in rows if r["sent"]]
         pending = [r for r in rows if not r["sent"]]
+        if sent_rows and st.toggle(f"Include the {len(sent_rows)} already sent (to send again, e.g. a test)",
+                                   key=f"camp_resend_{cid}",
+                                   help="Adds customers who've already had this email back into the list below, unticked"
+                                        " unless you tick them. Sending again replaces their earlier send in the log."):
+            pending = pending + [dict(r, resend=True) for r in sent_rows]
 
         # ---- The countdown ----
         total = len(rows)
@@ -2362,7 +2367,8 @@ def render_campaigns(only: Optional[str] = None) -> None:
                 if not pending:
                     st.caption("No customers left to send match that search.")
             pdf = pd.DataFrame([{
-                "key": r["key"], "Send": tick, "Customer": r["acct"].get("Account_Name", ""),
+                "key": r["key"], "Send": tick if f"camp_sel_{cid}" in ss else (tick and not r.get("resend")),
+                "Customer": r["acct"].get("Account_Name", "") + ("  ↻ sent before" if r.get("resend") else ""),
                 "Contact": contact_name(r["contact"]), "Email": r["contact"].get("Email", ""),
                 "Brand": brand_for(r["acct"].get("_type") or "")[0]["name"], "Type": r["acct"].get("_type", ""),
             } for r in pending], columns=["key", "Send", "Customer", "Contact", "Email", "Brand", "Type"])
@@ -2671,44 +2677,47 @@ def render_xmas_tracker() -> None:
                         key="xm_show", label_visibility="collapsed")
         view = [r for r in rows if show == "Everyone" or r["Status"] == show.replace("To set up", "Replied")]
         fmt = lambda d: d.strftime("%d %b") if d else ""  # noqa: E731
-        df = pd.DataFrame([{**{k: v for k, v in r.items() if not k.startswith("_")},
-                            "Emailed": fmt(r["Emailed"]), "Replied": fmt(r["Replied"]),
-                            "First change": r["First change"].strftime("%a %d %b") if r["First change"] else ""}
-                           for r in view])
-        edited = _data_editor(
-            df, hide_index=True, num_rows="fixed", key=f"xm_tbl_{st.session_state.get('xm_ver', 0)}_{show}",
-            height=min(38 + 35 * len(df), 520),
-            column_order=["Set up", "Status", "Customer", "First change", "Ticket", "Ticket link", "Christmas hours",
-                          "While closed", "Message",
-                          "Recording", "Notes", "Contact", "Email", "Phone", "Brand", "Emailed", "Reminders", "Replied",
-                          "Set up by", "Zoho"],
-            disabled=[c for c in df.columns if c != "Set up"],
-            column_config={
-                "Set up": st.column_config.CheckboxColumn("Set up", width="small",
-                                                          help="Tick once the engineers have set it up on the phone system"),
-                "Christmas hours": st.column_config.TextColumn("Christmas hours", width="large"),
-                "Message": st.column_config.TextColumn("Message", width="medium"),
-                "Zoho": st.column_config.LinkColumn("Zoho", display_text="Open ↗", width="small"),
-                "Ticket link": st.column_config.LinkColumn("Desk", display_text="Ticket ↗", width="small"),
-                "Reminders": st.column_config.NumberColumn("Reminders", width="small"),
-            })
-        changed = {r["aid"]: bool(v) for r, v in zip(view, list(edited["Set up"])) if bool(v) != r["Set up"]}
-        if changed:
-            if st.button(f"💾  Save {len(changed)} set-up change(s)", type="primary", key="xm_save"):
-                who = get_sender().get("name") or "Customer Growth"
-                upd = {aid: ({"done": True, "by": who, "at": now_uk().isoformat(timespec="seconds")} if v else None)
-                       for aid, v in changed.items()}
-                try:
-                    st.session_state["xmas_setup"] = XMAS_SETUP.apply(upd, f"Christmas hours: {len(upd)} set-up ticks")
-                except Exception as exc:
-                    st.warning(f"Couldn't save to GitHub ({exc.__class__.__name__}); kept for this session only.")
-                    for aid, v in upd.items():
-                        if v:
-                            st.session_state["xmas_setup"][aid] = v
-                        else:
-                            st.session_state["xmas_setup"].pop(aid, None)
-                st.session_state["xm_ver"] = st.session_state.get("xm_ver", 0) + 1
-                st.rerun()
+        if not view:
+            st.caption("Nobody in this group yet.")
+        else:
+            df = pd.DataFrame([{**{k: v for k, v in r.items() if not k.startswith("_")},
+                                "Emailed": fmt(r["Emailed"]), "Replied": fmt(r["Replied"]),
+                                "First change": r["First change"].strftime("%a %d %b") if r["First change"] else ""}
+                               for r in view])
+            edited = _data_editor(
+                df, hide_index=True, num_rows="fixed", key=f"xm_tbl_{st.session_state.get('xm_ver', 0)}_{show}",
+                height=min(38 + 35 * len(df), 520),
+                column_order=["Set up", "Status", "Customer", "First change", "Ticket", "Ticket link", "Christmas hours",
+                              "While closed", "Message",
+                              "Recording", "Notes", "Contact", "Email", "Phone", "Brand", "Emailed", "Reminders", "Replied",
+                              "Set up by", "Zoho"],
+                disabled=[c for c in df.columns if c != "Set up"],
+                column_config={
+                    "Set up": st.column_config.CheckboxColumn("Set up", width="small",
+                                                              help="Tick once the engineers have set it up on the phone system"),
+                    "Christmas hours": st.column_config.TextColumn("Christmas hours", width="large"),
+                    "Message": st.column_config.TextColumn("Message", width="medium"),
+                    "Zoho": st.column_config.LinkColumn("Zoho", display_text="Open ↗", width="small"),
+                    "Ticket link": st.column_config.LinkColumn("Desk", display_text="Ticket ↗", width="small"),
+                    "Reminders": st.column_config.NumberColumn("Reminders", width="small"),
+                })
+            changed = {r["aid"]: bool(v) for r, v in zip(view, list(edited["Set up"])) if bool(v) != r["Set up"]}
+            if changed:
+                if st.button(f"💾  Save {len(changed)} set-up change(s)", type="primary", key="xm_save"):
+                    who = get_sender().get("name") or "Customer Growth"
+                    upd = {aid: ({"done": True, "by": who, "at": now_uk().isoformat(timespec="seconds")} if v else None)
+                           for aid, v in changed.items()}
+                    try:
+                        st.session_state["xmas_setup"] = XMAS_SETUP.apply(upd, f"Christmas hours: {len(upd)} set-up ticks")
+                    except Exception as exc:
+                        st.warning(f"Couldn't save to GitHub ({exc.__class__.__name__}); kept for this session only.")
+                        for aid, v in upd.items():
+                            if v:
+                                st.session_state["xmas_setup"][aid] = v
+                            else:
+                                st.session_state["xmas_setup"].pop(aid, None)
+                    st.session_state["xm_ver"] = st.session_state.get("xm_ver", 0) + 1
+                    st.rerun()
         full = pd.DataFrame([{**{k: v for k, v in r.items() if not k.startswith("_")},
                               "Emailed": fmt(r["Emailed"]), "Replied": fmt(r["Replied"]),
                               "First change": r["First change"].strftime("%Y-%m-%d") if r["First change"] else "",
@@ -2724,8 +2733,9 @@ def render_xmas_tracker() -> None:
         waiting = [r for r in rows if r["Status"] == "⏳ Awaiting" and r["_contacts"]]
         if waiting:
             with st.expander(f"🔔  Send a reminder to customers who haven't replied ({len(waiting)})"):
-                quiet_days = st.selectbox("Only if their last Christmas email was at least", [3, 5, 7, 10], index=1,
-                                          key="xm_quiet", format_func=lambda d: f"{d} days ago")
+                quiet_days = st.selectbox("Only if their last Christmas email was at least", [0, 3, 5, 7, 10], index=2,
+                                          key="xm_quiet",
+                                          format_func=lambda d: "any time (e.g. a test)" if d == 0 else f"{d} days ago")
                 due = [r for r in waiting if r["_last"] and (now_uk() - r["_last"]).days >= quiet_days]
                 st.caption(f"{len(due)} of {len(waiting)} are due a reminder. Each goes to the same contact(s) as the"
                            " first email, in their own brand, with their personal form link.")
