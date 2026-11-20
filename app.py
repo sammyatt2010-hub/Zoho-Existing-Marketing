@@ -3019,6 +3019,7 @@ def build_cg_activity() -> List[Dict[str, Any]]:
                        "How": _act_how(r), "Zoho": ZOHO.record_url("Accounts", key) if str(key).isdigit() else ""})
     names = {c["id"]: f"Campaign {c['id'][1:]}: {c.get('focus', '')}" for c in CAMPAIGNS}
     names.update({c["id"]: c["label"] for c in (XMAS_CAMPAIGN, XMAS_REMINDER)})
+    names["ci_report"] = "Call report (sent from Call Insights)"
     for key, r in get_camp_log().items():
         if not isinstance(r, dict):
             continue
@@ -3478,7 +3479,8 @@ with col_right:
             if aid in log_now:
                 meta.append(chip(f"Emailed {sent_label(log_now[aid])[2:]}", "good"))
             for cid_ in campaigns_for_account(aid):
-                meta.append(chip(f"Campaign M{CAMPAIGN_BY_ID.get(cid_, {}).get('month', '?')} ✓", "muted"))
+                meta.append(chip("Call report ✓" if cid_ == "ci_report"
+                                 else f"Campaign M{CAMPAIGN_BY_ID.get(cid_, {}).get('month', '?')} ✓", "muted"))
             render_html(f'<div class="pe-firm"><div><div class="name">{esc(acct.get("Account_Name", ""))}</div>'
                         f'<div class="meta">{"".join(meta)}</div></div></div>')
             z1, z2 = columns([1.7, 1])
